@@ -186,7 +186,12 @@ function createSqlDb(cfg, credential, log = console) {
         port: 1433,
         options: { encrypt: true, trustServerCertificate: false },
         authentication: { type: 'token-credential', options: { credential } },
-        pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
+        // Keep connections open: opening one to the database in another region
+        // (managed-identity token, TLS, gateway redirect) can take several
+        // seconds, and with min 0 / 30 s idle every quiet spell meant paying
+        // that again (v2.3.1 test runs: 5-15 s sign-ins). TCP keep-alive keeps
+        // the idle connections alive through the SQL gateway.
+        pool: { max: 10, min: 2, idleTimeoutMillis: 600000 },
         connectionTimeout: 30000,
         requestTimeout: 30000,
       })
