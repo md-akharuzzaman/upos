@@ -5,6 +5,7 @@ import Receipt from './Receipt.jsx';
 import RefundItems from './RefundItems.jsx';
 import { useLoader } from '../lib/useLoader.js';
 import { today, tz } from '../lib/dates.js';
+import { paymentLabel } from '../lib/payments.js';
 
 export default function Sales({ token, currency, canRefund = false, canOverride = false, onAuthError }) {
   const [date, setDate] = useState(today());
@@ -72,7 +73,7 @@ export default function Sales({ token, currency, canRefund = false, canOverride 
               <td>{new Date(s.createdAt).toLocaleTimeString('en-CA', { hour: '2-digit', minute: '2-digit' })}</td>
               <td>{s.cashierName}</td>
               <td>{s.lines.reduce((n, l) => n + l.qty, 0)}</td>
-              <td>{s.payment.method}</td>
+              <td>{paymentLabel(s.payment)}</td>
               <td className="num">{formatMoney(s.totalCents, currency)}</td>
               <td>
                 {s.status === 'refunded' ? (

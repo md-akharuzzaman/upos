@@ -180,12 +180,49 @@ az sql db update -g rg-eurc-test-ncus -s <sql-server> -n sqldb-eurc-core-test --
 az sql db update -g rg-eurc-test-ncus -s <sql-server> -n sqldb-eurc-core-test --service-objective Basic
 ```
 
+Measured on 24 Oct 2026 with S2: 200,000 rows in 328 s on test and 291 s on prod
+(about 600-700 rows/s); the dry run checks all rows in about 2 minutes.
+
+## Payments and the GST/HST report (v2.4)
+
+**Payment methods.** The Admin chooses them under *Business → Payment methods*:
+cash, debit, credit, Interac e-Transfer (needs the e-Transfer e-mail) and Stripe.
+The register offers only those. The POS records the payment; it never charges a
+card or moves money:
+
+| Method | The cashier enters | Refund |
+|---|---|---|
+| Debit / Credit | the terminal approval code (credit: card brand, optional) | reverse it on the terminal |
+| e-Transfer | the reference number from the deposit notification | send an e-Transfer back |
+| Stripe | the Stripe payment id (`pi_…`) | refund in the Stripe dashboard |
+
+**GST/HST report** (*GST/HST* tab, Admin and Manager). Pick a month, quarter, year
+or custom dates (store time zone). It shows sales and tax by rate, refunds given
+in the period, payments by method, and the two return lines:
+
+* **Line 101** - sales and other revenue before tax, after refunds (zero-rated included)
+* **Line 103** - GST/HST collected, net of the tax refunded in the period
+
+*Export to Excel* writes the same figures (Summary, By tax rate, Payments).
+Input tax credits (line 106) come from purchase invoices and are not included.
+
+QA on test:
+
+1. *Business*: tick e-Transfer and Stripe, set the e-Transfer e-mail, save.
+2. Register: sell one item each by Debit, Credit (brand Visa), e-Transfer and
+   Stripe; the receipt names the method and its reference.
+3. Sales: refund the e-Transfer sale; the dialog says "Send this amount back
+   ... by Interac e-Transfer".
+4. *Report*: one row per method used.
+5. *GST/HST*, *This month*: line 103 = tax on sales - tax refunded; export to Excel.
+6. Sign in as a cashier or a Sales user: there is no *GST/HST* tab (the API answers 403).
+
 ## Screenshots worth taking
 
 * GitHub: CD run graph, a PR with the four checks and the CODEOWNERS review,
   the tester's prod approval dialog, the Playwright report, the releases list.
 * The POS on each environment (DEV / TEST / PROD badge): register, payment,
-  receipt, daily report.
+  receipt, daily report, GST/HST report.
 * Portal: `rg-eurc-prod-cc`, staging slot, private endpoints, Application map, Alerts.
 * Cloud Shell: `20-test-env.sh` totals and the `30-monitor.sh` snapshot.
 

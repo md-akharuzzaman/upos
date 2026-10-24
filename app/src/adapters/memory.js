@@ -27,6 +27,7 @@ function createMemoryDb() {
 
   return {
     kind: 'memory',
+    sales, // tests only: lets a test shape data older versions wrote
     async init() {
       return { schemaVersion: MIGRATIONS.at(-1).version };
     },
@@ -269,6 +270,52 @@ function createMemoryDb() {
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
         .slice(0, limit)
         .map(clone);
+    },
+    /** Same sums as the SQL adapter's taxReport (see adapters/azure.js). */
+    async taxReport(storeId, { from, to }) {
+      const inWindow = (t) => t && t >= from && t < to;
+      const mine = [...sales.values()].filter((s) => s.storeId === storeId);
+      const salesByRate = new Map();
+      const refundsByRate = new Map();
+      const payments = new Map();
+      const add = (map, key, init, fn) => {
+        if (!map.has(key)) map.set(key, { ...init });
+        fn(map.get(key));
+      };
+      const pay = (method, fn) => add(payments, method, { method, salesCount: 0, salesCents: 0, refundsCount: 0, refundCents: 0 }, fn);
+      for (const s of mine) {
+        if (inWindow(s.createdAt)) {
+          for (const l of s.lines)
+            add(salesByRate, l.taxRateBp, { rateBp: l.taxRateBp, netCents: 0, taxCents: 0, discountCents: 0 }, (x) => {
+              x.netCents += l.lineSubtotalCents;
+              x.taxCents += l.lineTaxCents;
+              x.discountCents += l.discountCents ?? 0;
+            });
+          pay(s.payment.method, (x) => {
+            x.salesCount += 1;
+            x.salesCents += s.totalCents;
+          });
+        }
+        const rate = new Map(s.lines.map((l) => [l.lineNo, l.taxRateBp]));
+        // v2.0 whole-sale refund: no refund rows, the sale's own lines at refundedAt
+        const legacy =
+          s.status === 'refunded' && s.refunds.length === 0 && inWindow(s.refundedAt)
+            ? [{ lines: s.lines, totalCents: s.totalCents, createdAt: s.refundedAt }]
+            : [];
+        for (const f of [...s.refunds, ...legacy]) {
+          if (!inWindow(f.createdAt)) continue;
+          for (const l of f.lines)
+            add(refundsByRate, rate.get(l.lineNo), { rateBp: rate.get(l.lineNo), netCents: 0, taxCents: 0 }, (x) => {
+              x.netCents += l.lineSubtotalCents;
+              x.taxCents += l.lineTaxCents;
+            });
+          pay(s.payment.method, (x) => {
+            x.refundsCount += 1;
+            x.refundCents += f.totalCents;
+          });
+        }
+      }
+      return { salesByRate: [...salesByRate.values()], refundsByRate: [...refundsByRate.values()], payments: [...payments.values()] };
     },
     /**
      * Records a refund atomically. plan(sale) validates and prices it (and

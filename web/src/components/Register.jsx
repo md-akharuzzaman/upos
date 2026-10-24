@@ -12,7 +12,7 @@ const PAGE = 48;
 const looksLikeCode = (s) => /^[A-Za-z0-9.-]{3,40}$/.test(s) && /[\d-]/.test(s);
 const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-export default function Register({ token, currency, onAuthError }) {
+export default function Register({ token, currency, profile, onAuthError }) {
   const [query, setQuery] = useState('');
   const [search, setSearch] = useState(''); // debounced query sent to the server
   const [category, setCategory] = useState('All');
@@ -251,6 +251,7 @@ export default function Register({ token, currency, onAuthError }) {
         <CheckoutDialog
           totalCents={cartTotals(lines, promotions).total}
           currency={currency}
+          profile={profile}
           busy={busy}
           error={error}
           onCancel={() => setCheckout(false)}

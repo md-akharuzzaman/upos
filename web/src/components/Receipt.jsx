@@ -1,4 +1,5 @@
 import { formatMoney } from '../lib/money.js';
+import { paymentLabel } from '../lib/payments.js';
 
 export default function Receipt({ receipt, onClose, closeLabel = 'New sale', extra }) {
   const c = receipt.store?.currency || 'CAD';
@@ -74,8 +75,8 @@ export default function Receipt({ receipt, onClose, closeLabel = 'New sale', ext
               </>
             ) : (
               <>
-                <dt>Card</dt>
-                <dd>{receipt.payment.cardReference}</dd>
+                <dt>{paymentLabel(receipt.payment)}</dt>
+                <dd data-testid="receipt-payment-ref">{receipt.payment.reference ?? receipt.payment.cardReference}</dd>
               </>
             )}
           </dl>

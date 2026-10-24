@@ -38,7 +38,9 @@ test('cash payment computes change; card needs a terminal reference only', () =>
     method: 'cash',
     tenderedCents: 1000,
     changeCents: 151,
+    reference: null,
     cardReference: null,
+    brand: null,
   });
   assert.throws(() => settlePayment({ method: 'cash', tenderedCents: 800 }, 849), />= total/);
   assert.equal(settlePayment({ method: 'card', reference: 'AUTH-7731' }, 849).cardReference, 'AUTH-7731');

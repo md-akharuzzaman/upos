@@ -5,7 +5,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const express = require('express');
 const { MIGRATIONS } = require('./migrations');
-const { priceBasket, normaliseBasket, settlePayment } = require('./domain/pricing');
+const { priceBasket, normaliseBasket } = require('./domain/pricing');
+const { settlePayment } = require('./domain/payments');
+const { periodWindow, buildTaxReport } = require('./domain/taxreport');
 const { withRefundTotals, planRefund, refundDeadline } = require('./domain/refunds');
 const { promotionInput, isRunning } = require('./domain/promotions');
 const { ROLES, can, permissionsOf, assignableRoles } = require('./domain/permissions');
@@ -201,12 +203,14 @@ const publicRefund = ({ id, refundNo, seq, createdAt, cashierName, method, reaso
  */
 function summarise(rawSales) {
   const sales = rawSales.map(withRefundTotals);
+  // cash and card always listed (v2.0-v2.3 clients read them); v2.4 adds debit, credit, etransfer, stripe as they occur
   const byPayment = { cash: { count: 0, totalCents: 0 }, card: { count: 0, totalCents: 0 } };
   const products = new Map();
   let refundsCount = 0;
   let refundedTax = 0;
   let refundedSub = 0;
   for (const s of sales) {
+    byPayment[s.payment.method] ??= { count: 0, totalCents: 0 };
     byPayment[s.payment.method].count += 1;
     byPayment[s.payment.method].totalCents += s.totalCents - s.refundedCents;
     refundsCount += s.refundState !== 'none' && s.refunds.length === 0 ? 1 : s.refunds.length; // v2.0 whole-sale refunds have no rows
@@ -795,7 +799,7 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     const now = new Date();
     const running = (await db.listPromotions(req.store.id)).filter((p) => isRunning(p, now));
     const priced = priceBasket(items, running, now);
-    const payment = settlePayment(req.body?.payment, priced.totalCents);
+    const payment = settlePayment(req.body?.payment, priced.totalCents, publicProfile(req.store.profile).paymentMethods);
     const id = crypto.randomUUID();
     let sale;
     try {
@@ -908,6 +912,15 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   });
 
   // ---- reports -----------------------------------------------------------
+  // GST/HST report for a period of calendar days in the store's time zone (v2.4).
+  app.get('/api/reports/tax', auth, need('reports.tax'), async (req, res) => {
+    const timeZone = publicProfile(req.store.profile).timeZone;
+    const { from, to } = req.query;
+    const w = periodWindow(from, to, timeZone);
+    const raw = await db.taxReport(req.store.id, w);
+    res.json(buildTaxReport(raw, { from, to, timeZone, store: req.store }));
+  });
+
   app.get('/api/reports/daily', auth, need('reports.view'), async (req, res) => {
     const date = req.query.date || new Date().toISOString().slice(0, 10);
     const w = dayWindow(date, req.query.tz);

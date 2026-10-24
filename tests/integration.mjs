@@ -281,6 +281,42 @@ try {
     const b = await api.call('POST', '/api/users', { token: cashier.token, body: { name: 'X', email: 'x@ci.test', password: 'Password1234', role: 'admin' } });
     assert(a.status === 403 && b.status === 403, `profile ${a.status}, users ${b.status}`);
   });
+
+  await suite.check('payments: debit, e-Transfer, Stripe; GST/HST report adds up (v2.4)', async () => {
+    const off = await api.call('POST', '/api/products', {
+      token: mgr.token,
+      body: { sku: 'GST-240', name: 'CI book', category: 'General', priceCents: 1000, taxRateBp: 500, stock: 5 },
+    });
+    assert(off.status === 201, `product HTTP ${off.status}`);
+    const sell = (payment) => api.call('POST', '/api/sales', { token: cashier.token, body: { items: [{ productId: off.body.id, qty: 1 }], payment } });
+    const refused = await sell({ method: 'etransfer', reference: 'CI24ETRANSFER' });
+    assert(refused.status === 400 && /not accepted/.test(refused.body.error), `e-Transfer before enabling: HTTP ${refused.status}`);
+    const p = await api.call('PUT', '/api/store/profile', {
+      token: mgr.token,
+      body: { paymentMethods: ['cash', 'debit', 'credit', 'etransfer', 'stripe'], etransferEmail: 'pay@ci.test' },
+    });
+    assert(p.status === 200, `profile HTTP ${p.status}`);
+    const d = await sell({ method: 'debit', reference: 'DB-2400' });
+    const e = await sell({ method: 'etransfer', reference: 'CI24ETRANSFER' });
+    const st = await sell({ method: 'stripe', reference: 'pi_CI24stripe0001' });
+    assert([d, e, st].every((x) => x.status === 201), `sales HTTP ${[d, e, st].map((x) => x.status)}`);
+    assert(d.body.sale.payment.method === 'debit' && d.body.sale.payment.brand === 'interac', `debit read back as ${JSON.stringify(d.body.sale.payment)}`);
+    const back = await api.call('GET', `/api/sales/${e.body.sale.id}/receipt`, { token: cashier.token });
+    assert(back.body.payment?.method === 'etransfer', `receipt payment ${JSON.stringify(back.body.payment)}`);
+    const rf = await api.call('POST', `/api/sales/${e.body.sale.id}/refunds`, { token: mgr.token, body: { items: [{ lineNo: 1, qty: 1 }] } });
+    assert(rf.status === 201 && rf.body.refund.method === 'etransfer', `refund HTTP ${rf.status} method ${rf.body.refund?.method}`);
+    const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Toronto' }).format(new Date());
+    const t = await api.call('GET', `/api/reports/tax?from=${day}&to=${day}`, { token: mgr.token });
+    assert(t.status === 200, `tax report HTTP ${t.status} ${JSON.stringify(t.body).slice(0, 200)}`);
+    const gst = t.body.byRate.find((x) => x.rateBp === 500);
+    assert(gst && gst.salesNetCents === 3000 && gst.salesTaxCents === 150 && gst.refundNetCents === 1000 && gst.taxCents === 100, `GST 5 % ${JSON.stringify(gst)}`);
+    const money = t.body.sales.totalCents - t.body.refunds.totalCents;
+    assert(money === t.body.totals.line101Cents + t.body.totals.line103Cents, `sales - refunds ${money} != line 101 + 103`);
+    assert(['debit', 'etransfer', 'stripe'].every((m) => t.body.payments.some((x) => x.method === m)), 'payment methods missing');
+    const sales = await api.call('GET', `/api/reports/tax?from=${day}&to=${day}`, { token: cashier.token });
+    assert(sales.status === 403, `cashier tax report HTTP ${sales.status}`);
+    return `line 103 ${t.body.totals.line103Cents} cents, ${t.body.sales.count} sales`;
+  });
 } finally {
   for (const s of [mgr, other]) {
     if (!s) continue;

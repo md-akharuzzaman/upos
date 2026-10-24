@@ -9,6 +9,7 @@ const { BlobServiceClient } = require('@azure/storage-blob');
 const { SecretClient } = require('@azure/keyvault-secrets');
 const { MIGRATIONS, BOOTSTRAP_SQL, ENSURE_ADMIN_SQL, pendingMigrations } = require('../migrations');
 const { applyChange, MAX_PRICE } = require('../domain/reprice');
+const { legacyMethod } = require('../domain/payments');
 
 function createCredential(cfg) {
   if (cfg.runningInAzure) return new ManagedIdentityCredential({ clientId: cfg.managedIdentityClientId });
@@ -77,8 +78,12 @@ const mapCategory = (r) => ({
   finalSale: Boolean(r.final_sale),
   createdAt: iso(r.created_at),
 });
-const mapSale = (r, lines = [], refunds = []) =>
-  r && {
+// v2.4: payment_type holds debit/credit/e-Transfer/Stripe; rows written by
+// older versions only have payment_method ('cash' or 'card').
+const mapSale = (r, lines = [], refunds = []) => {
+  if (!r) return r;
+  const method = r.payment_type || r.payment_method;
+  return {
     id: lower(r.id),
     storeId: lower(r.store_id),
     receiptNo: r.receipt_no,
@@ -89,18 +94,22 @@ const mapSale = (r, lines = [], refunds = []) =>
     discountCents: r.discount_cents ?? 0,
     totalCents: r.total_cents,
     payment: {
-      method: r.payment_method,
+      method,
       tenderedCents: r.tendered_cents,
       changeCents: r.change_cents,
-      cardReference: r.card_reference,
+      reference: r.card_reference,
+      cardReference: r.card_reference, // v2.0-v2.3 name
+      brand: r.payment_brand ?? null,
     },
     status: r.status,
     receiptBlob: r.receipt_blob,
     createdAt: iso(r.created_at),
     refundedAt: iso(r.refunded_at),
     lines,
-    refunds,
+    // refunds.method only stores the compatible 'cash'/'card': a refund goes back the way the sale was paid
+    refunds: refunds.map((x) => ({ ...x, method })),
   };
+};
 const mapRefund = (r, lines = []) => ({
   id: lower(r.id),
   saleId: lower(r.sale_id),
@@ -785,14 +794,16 @@ function createSqlDb(cfg, credential, log = console) {
           .input('tax', sql.Int, sale.taxCents)
           .input('tot', sql.Int, sale.totalCents)
           .input('disc', sql.Int, sale.discountCents ?? 0)
-          .input('pm', sql.NVarChar(10), sale.payment.method)
+          .input('pm', sql.NVarChar(10), legacyMethod(sale.payment.method))
+          .input('pt', sql.NVarChar(10), sale.payment.method)
+          .input('pb', sql.NVarChar(20), sale.payment.brand ?? null)
           .input('ten', sql.Int, sale.payment.tenderedCents)
           .input('chg', sql.Int, sale.payment.changeCents)
-          .input('ref', sql.NVarChar(40), sale.payment.cardReference)
+          .input('ref', sql.NVarChar(40), sale.payment.reference ?? sale.payment.cardReference ?? null)
           .input('blob', sql.NVarChar(400), sale.receiptBlob)
           .query(`INSERT INTO dbo.sales(id, store_id, receipt_no, cashier_id, cashier_name, subtotal_cents, tax_cents, total_cents,
-                    discount_cents, payment_method, tendered_cents, change_cents, card_reference, receipt_blob)
-                  VALUES (@id, @s, @no, @cid, @cn, @sub, @tax, @tot, @disc, @pm, @ten, @chg, @ref, @blob)`);
+                    discount_cents, payment_method, payment_type, payment_brand, tendered_cents, change_cents, card_reference, receipt_blob)
+                  VALUES (@id, @s, @no, @cid, @cn, @sub, @tax, @tot, @disc, @pm, @pt, @pb, @ten, @chg, @ref, @blob)`);
         for (const l of sale.lines) {
           await r()
             .input('sid', sql.UniqueIdentifier, sale.id)
@@ -843,6 +854,58 @@ function createSqlDb(cfg, credential, log = console) {
       return r.recordset.map((x) => mapSale(x, lines.get(lower(x.id)) || [], refunds.get(lower(x.id)) || []));
     },
     /**
+     * Sums for the GST/HST report (v2.4), computed in SQL so a year of a busy
+     * store never travels to the app. Sales count in [from, to) by sale time;
+     * refunds by refund time. v2.0 whole-sale refunds have no refund rows: they
+     * count by refunded_at with the sale's own lines (filtered index
+     * ix_sales_store_refunded, migration 7). Sums are BIGINT (a year
+     * of sales can pass the INT limit of 21 million dollars in cents).
+     */
+    async taxReport(storeId, { from, to }) {
+      const r = await (
+        await req()
+      )
+        .input('s', sql.UniqueIdentifier, storeId)
+        .input('from', sql.DateTime2, new Date(from))
+        .input('to', sql.DateTime2, new Date(to)).query(`
+SELECT l.tax_rate_bp AS rateBp, SUM(CAST(l.line_subtotal_cents AS BIGINT)) AS netCents,
+       SUM(CAST(l.line_tax_cents AS BIGINT)) AS taxCents, SUM(CAST(ISNULL(l.discount_cents, 0) AS BIGINT)) AS discountCents
+FROM dbo.sales s JOIN dbo.sale_lines l ON l.sale_id = s.id
+WHERE s.store_id = @s AND s.created_at >= @from AND s.created_at < @to
+GROUP BY l.tax_rate_bp;
+
+SELECT x.rateBp, SUM(x.netCents) AS netCents, SUM(x.taxCents) AS taxCents FROM (
+  SELECT sl.tax_rate_bp AS rateBp, CAST(rl.line_subtotal_cents AS BIGINT) AS netCents, CAST(rl.line_tax_cents AS BIGINT) AS taxCents
+  FROM dbo.refunds f
+  JOIN dbo.refund_lines rl ON rl.refund_id = f.id
+  JOIN dbo.sale_lines sl ON sl.sale_id = f.sale_id AND sl.line_no = rl.line_no
+  WHERE f.store_id = @s AND f.created_at >= @from AND f.created_at < @to
+  UNION ALL
+  SELECT l.tax_rate_bp, CAST(l.line_subtotal_cents AS BIGINT), CAST(l.line_tax_cents AS BIGINT)
+  FROM dbo.sales s JOIN dbo.sale_lines l ON l.sale_id = s.id
+  WHERE s.store_id = @s AND s.status = N'refunded' AND s.refunded_at >= @from AND s.refunded_at < @to
+    AND NOT EXISTS (SELECT 1 FROM dbo.refunds f WHERE f.sale_id = s.id)
+) x GROUP BY x.rateBp;
+
+SELECT x.method, SUM(x.salesCount) AS salesCount, SUM(x.salesCents) AS salesCents,
+       SUM(x.refundsCount) AS refundsCount, SUM(x.refundCents) AS refundCents FROM (
+  SELECT COALESCE(s.payment_type, s.payment_method) AS method, 1 AS salesCount, CAST(s.total_cents AS BIGINT) AS salesCents,
+         0 AS refundsCount, CAST(0 AS BIGINT) AS refundCents
+  FROM dbo.sales s WHERE s.store_id = @s AND s.created_at >= @from AND s.created_at < @to
+  UNION ALL
+  SELECT COALESCE(s.payment_type, s.payment_method), 0, 0, 1, CAST(f.total_cents AS BIGINT)
+  FROM dbo.refunds f JOIN dbo.sales s ON s.id = f.sale_id
+  WHERE f.store_id = @s AND f.created_at >= @from AND f.created_at < @to
+  UNION ALL
+  SELECT COALESCE(s.payment_type, s.payment_method), 0, 0, 1, CAST(s.total_cents AS BIGINT)
+  FROM dbo.sales s
+  WHERE s.store_id = @s AND s.status = N'refunded' AND s.refunded_at >= @from AND s.refunded_at < @to
+    AND NOT EXISTS (SELECT 1 FROM dbo.refunds f WHERE f.sale_id = s.id)
+) x GROUP BY x.method;`);
+      const [salesByRate, refundsByRate, payments] = r.recordsets;
+      return { salesByRate, refundsByRate, payments };
+    },
+    /**
      * Records a refund in one transaction. The sale row is locked first
      * (UPDLOCK, HOLDLOCK), so two tills refunding the same receipt at once are
      * serialised and the second sees the first one's refund before planning.
@@ -865,7 +928,7 @@ function createSqlDb(cfg, credential, log = console) {
           .input('seq', sql.Int, seq)
           .input('cid', sql.UniqueIdentifier, meta.cashierId)
           .input('cn', sql.NVarChar(120), meta.cashierName)
-          .input('m', sql.NVarChar(10), sale.payment.method)
+          .input('m', sql.NVarChar(10), legacyMethod(sale.payment.method))
           .input('why', sql.NVarChar(200), meta.reason ?? null)
           .input('ovr', sql.Bit, meta.policyOverride ?? false)
           .input('sub', sql.Int, draft.subtotalCents)

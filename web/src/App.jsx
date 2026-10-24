@@ -8,6 +8,7 @@ import Report from './components/Report.jsx';
 import Team from './components/Team.jsx';
 import Promotions from './components/Promotions.jsx';
 import Business from './components/Business.jsx';
+import TaxReport from './components/TaxReport.jsx';
 import { can, ROLE_LABELS } from './lib/permissions.js';
 
 // Each screen needs one permission (lib/permissions.js; the API checks again).
@@ -17,6 +18,7 @@ const TABS = [
   { id: 'products', label: 'Products', permission: 'products.manage' },
   { id: 'promotions', label: 'Promotions', permission: 'promotions.manage' },
   { id: 'report', label: 'Report', permission: 'reports.view' },
+  { id: 'tax', label: 'GST/HST', permission: 'reports.tax' },
   { id: 'team', label: 'Staff', permission: 'staff.manage' },
   { id: 'business', label: 'Business', permission: 'business.profile' },
 ];
@@ -42,6 +44,29 @@ export default function App() {
     session.save(next);
     setS(next);
   };
+
+  // Refresh the store (payment methods, business details) once per session:
+  // an Admin may have changed them since this till signed in.
+  const token = s?.token;
+  useEffect(() => {
+    if (!token) return;
+    let live = true;
+    api('/api/me', { token })
+      .then((me) => {
+        if (live && me?.store) {
+          setS((cur) => {
+            if (!cur || cur.token !== token) return cur;
+            const next = { ...cur, store: { ...cur.store, ...me.store } };
+            session.save(next);
+            return next;
+          });
+        }
+      })
+      .catch(() => {}); // offline or an older API: keep the stored copy
+    return () => {
+      live = false;
+    };
+  }, [token]);
 
   const env = info?.environment;
   const tabs = s ? TABS.filter((t) => can(s.user, t.permission)) : [];
@@ -80,7 +105,7 @@ export default function App() {
             ))}
           </nav>
           <main>
-            {tab === 'register' && <Register token={s.token} currency={s.store.currency} onAuthError={signOut} />}
+            {tab === 'register' && <Register token={s.token} currency={s.store.currency} profile={s.store.profile} onAuthError={signOut} />}
             {tab === 'sales' && (
               <Sales
                 token={s.token}
@@ -94,6 +119,7 @@ export default function App() {
               <Products token={s.token} currency={s.store.currency} canEditCategories={can(s.user, 'categories.manage')} onAuthError={signOut} />
             )}
             {tab === 'report' && <Report token={s.token} currency={s.store.currency} onAuthError={signOut} />}
+            {tab === 'tax' && <TaxReport token={s.token} currency={s.store.currency} onAuthError={signOut} />}
             {tab === 'promotions' && <Promotions token={s.token} currency={s.store.currency} onAuthError={signOut} />}
             {tab === 'team' && (
               <Team
