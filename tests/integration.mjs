@@ -27,9 +27,10 @@ let cashSale = null;
 console.log(`Integration testing ${base} with store ci-${tag}`);
 
 try {
-  await suite.check('create store + manager (SQL transaction, Key Vault signing key)', async () => {
+  await suite.check('create store + its Admin (SQL transaction, Key Vault signing key)', async () => {
     mgr = await api.createStore(`ci-${tag}`);
-    assert(mgr.user.role === 'manager' && mgr.token, 'no manager session');
+    // the store owner is Manager before v2.3 and Admin from v2.3 on
+    assert(['admin', 'manager'].includes(mgr.user.role) && mgr.token, `no owner session (role ${mgr.user.role})`);
     return mgr.store.id;
   });
 
@@ -176,7 +177,10 @@ try {
   });
 
   await suite.check('batch price change by category with preview (v2.2)', async () => {
-    const pre = await api.call('POST', '/api/products/bulk-update', { token: mgr.token, body: { category: 'Merch', price: { mode: 'percent', value: 1000 }, dryRun: true } });
+    const pre = await api.call('POST', '/api/products/bulk-update', {
+      token: mgr.token,
+      body: { category: 'Merch', price: { mode: 'percent', value: 1000 }, dryRun: true },
+    });
     assert(pre.status === 200 && pre.body.changes[0].after.priceCents === 1320, `preview ${JSON.stringify(pre.body)}`);
     const r = await api.call('POST', '/api/products/bulk-update', { token: mgr.token, body: { category: 'Merch', price: { mode: 'percent', value: 1000 } } });
     assert(r.status === 200, `HTTP ${r.status}`);
@@ -186,11 +190,20 @@ try {
 
   let v22sale;
   await suite.check('promotion applied at checkout, tax on the discounted price (v2.2)', async () => {
-    const p = await api.call('POST', '/api/promotions', { token: mgr.token, body: { name: 'CI mug 25%', kind: 'percent', value: 2500, target: 'skus', skus: ['MUG-100'] } });
+    const p = await api.call('POST', '/api/promotions', {
+      token: mgr.token,
+      body: { name: 'CI mug 25%', kind: 'percent', value: 2500, target: 'skus', skus: ['MUG-100'] },
+    });
     assert(p.status === 201, `HTTP ${p.status}`);
     const r = await api.call('POST', '/api/sales', {
       token: cashier.token,
-      body: { items: [{ productId: v22['MUG-100'].id, qty: 1 }, { productId: v22['SAN-100'].id, qty: 1 }], payment: { method: 'card', reference: 'AUTH-2200' } },
+      body: {
+        items: [
+          { productId: v22['MUG-100'].id, qty: 1 },
+          { productId: v22['SAN-100'].id, qty: 1 },
+        ],
+        payment: { method: 'card', reference: 'AUTH-2200' },
+      },
     });
     assert(r.status === 201, `sale HTTP ${r.status}`);
     v22sale = r.body.sale;
@@ -210,6 +223,63 @@ try {
     assert(yes.status === 201 && yes.body.refund.policyOverride === true, `override HTTP ${yes.status}`);
     const mug = await api.call('POST', `/api/sales/${v22sale.id}/refunds`, { token: mgr.token, body: { items: [{ lineNo: 1, qty: 1 }] } });
     assert(mug.status === 201 && mug.body.refund.totalCents === 1119, `mug refund ${mug.body?.refund?.totalCents} (expected the paid 9.90 + 1.29)`);
+  });
+  // ---- v2.3 foundations -----------------------------------------------------
+  await suite.check('readiness endpoint and Admin role for the store owner (v2.3)', async () => {
+    const r = await api.call('GET', '/health/ready');
+    assert(r.status === 200 && r.body.status === 'Ready', `ready HTTP ${r.status}`);
+    assert(mgr.user.role === 'admin', `owner role ${mgr.user.role}`);
+  });
+
+  await suite.check('business profile on the receipt; bank details masked (v2.3)', async () => {
+    const p = await api.call('PUT', '/api/store/profile', {
+      token: mgr.token,
+      body: {
+        legalName: 'CI Retail Inc.',
+        storeType: 'supermarket',
+        address: { line1: '1 Test St', city: 'Toronto', province: 'ON', postalCode: 'M5V 1A1' },
+        gstHstNumber: '123456789RT0001',
+        bank: { bankName: 'CI Bank', accountName: 'CI Retail Inc.', institutionNumber: '001', transitNumber: '12345', accountNumber: '7654321' },
+      },
+    });
+    assert(p.status === 200, `HTTP ${p.status} ${JSON.stringify(p.body)}`);
+    assert(p.body.profile.bank.account === '••••4321' && !JSON.stringify(p.body).includes('7654321'), 'bank number not masked');
+  });
+
+  let v23 = {};
+  await suite.check('starter categories, barcode scan lookup, sub-category paging (v2.3)', async () => {
+    const s = await api.call('POST', '/api/categories/suggested', { token: mgr.token, body: {} });
+    assert(s.status === 200 && s.body.created > 10, `suggested HTTP ${s.status}`);
+    const p = await api.call('POST', '/api/products', {
+      token: mgr.token,
+      body: { sku: 'MLK-230', name: 'CI Milk 2 L', category: 'Food', subcategory: 'Dairy', barcode: '4006381333931', priceCents: 499, taxRateBp: 0, stock: 5 },
+    });
+    assert(p.status === 201 && p.body.refundable === false, `create HTTP ${p.status} refundable=${p.body.refundable}`);
+    const hit = await api.call('GET', '/api/products/lookup?code=4006381333931', { token: cashier.token });
+    assert(hit.status === 200 && hit.body.sku === 'MLK-230', `lookup HTTP ${hit.status}`);
+    const page = await api.call('GET', '/api/products?category=Food&subcategory=Dairy&limit=10&offset=0', { token: cashier.token });
+    assert(page.body.total === 1 && page.body.items[0].sku === 'MLK-230', `page ${JSON.stringify(page.body).slice(0, 120)}`);
+    v23 = p.body;
+  });
+
+  await suite.check('expired products cannot be sold (v2.3)', async () => {
+    await api.call('PATCH', `/api/products/${v23.id}`, { token: mgr.token, body: { expiresOn: '2020-01-01' } });
+    const r = await api.call('POST', '/api/sales', {
+      token: cashier.token,
+      body: { items: [{ productId: v23.id, qty: 1 }], payment: { method: 'card', reference: 'AUTH-2300' } },
+    });
+    assert(r.status === 409 && /expired/.test(r.body.error), `HTTP ${r.status} ${r.body.error}`);
+    const exp = await api.call('GET', '/api/products?expiring=0&limit=10', { token: mgr.token });
+    assert(
+      exp.body.items.some((x) => x.sku === 'MLK-230'),
+      'not listed as expired',
+    );
+  });
+
+  await suite.check('roles: a cashier cannot change staff or the business profile (v2.3)', async () => {
+    const a = await api.call('PUT', '/api/store/profile', { token: cashier.token, body: { legalName: 'x' } });
+    const b = await api.call('POST', '/api/users', { token: cashier.token, body: { name: 'X', email: 'x@ci.test', password: 'Password1234', role: 'admin' } });
+    assert(a.status === 403 && b.status === 403, `profile ${a.status}, users ${b.status}`);
   });
 } finally {
   for (const s of [mgr, other]) {
