@@ -1,11 +1,17 @@
 import { useMemo, useState } from 'react';
 import { api } from '../api.js';
 import { formatMoney, parseMoney } from '../lib/money.js';
+import { categoryOptions } from '../lib/categories.js';
 
 // Manager-only: change price and/or tax for many products at once - the
 // ticked products, one category, or everything. Always previewed first.
-export default function BulkPriceTax({ token, products, selectedIds = [], currency, onClose, onDone }) {
-  const categories = useMemo(() => [...new Set(products.map((p) => p.category))].sort(), [products]);
+export default function BulkPriceTax({ token, products = [], categories: cats = [], selectedIds = [], currency, onClose, onDone }) {
+  // categories and sub-categories of the store; without any, the categories seen on the page
+  const options = useMemo(
+    () => (cats.length ? categoryOptions(cats) : [...new Set(products.map((p) => p.category))].sort().map((c) => ({ key: c, value: c, label: c }))),
+    [cats, products],
+  );
+  const categories = options.map((o) => o.value);
   const [scope, setScope] = useState(selectedIds.length ? 'selected' : 'category');
   const [category, setCategory] = useState(categories[0] || '');
   const [mode, setMode] = useState('percent');
@@ -28,7 +34,8 @@ export default function BulkPriceTax({ token, products, selectedIds = [], curren
       let v;
       if (mode === 'percent') v = Number(abs) * 100;
       else v = parseMoney(abs);
-      if (v == null || !Number.isFinite(v) || abs === '') throw new Error(mode === 'percent' ? 'Enter a percentage, e.g. 10 or -5' : 'Enter an amount, e.g. 2.50');
+      if (v == null || !Number.isFinite(v) || abs === '')
+        throw new Error(mode === 'percent' ? 'Enter a percentage, e.g. 10 or -5' : 'Enter an amount, e.g. 2.50');
       if (mode === 'set' && neg) throw new Error('A price cannot be negative');
       b.price = { mode, value: Math.round(neg ? -v : v) };
     }
@@ -68,15 +75,17 @@ export default function BulkPriceTax({ token, products, selectedIds = [], curren
           <legend>Products</legend>
           {selectedIds.length > 0 && (
             <label className="check">
-              <input type="radio" name="scope" checked={scope === 'selected'} onChange={() => (setScope('selected'), setPreview(null))} /> The {selectedIds.length}{' '}
-              ticked product(s)
+              <input type="radio" name="scope" checked={scope === 'selected'} onChange={() => (setScope('selected'), setPreview(null))} /> The{' '}
+              {selectedIds.length} ticked product(s)
             </label>
           )}
           <label className="check">
             <input type="radio" name="scope" checked={scope === 'category'} onChange={() => (setScope('category'), setPreview(null))} /> Category
             <select aria-label="Category" value={category} onChange={reset(setCategory)} disabled={scope !== 'category'}>
-              {categories.map((c) => (
-                <option key={c}>{c}</option>
+              {options.map((o) => (
+                <option key={o.key} value={o.value}>
+                  {o.label}
+                </option>
               ))}
             </select>
           </label>
@@ -139,6 +148,7 @@ export default function BulkPriceTax({ token, products, selectedIds = [], curren
                 ))}
               </tbody>
             </table>
+            {preview.more > 0 && <p className="hint">…and {preview.more.toLocaleString('en-CA')} more product(s) with the same change.</p>}
           </div>
         )}
         {error && (

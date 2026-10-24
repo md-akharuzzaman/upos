@@ -7,7 +7,8 @@ const sql = require('mssql');
 const { ManagedIdentityCredential, DefaultAzureCredential } = require('@azure/identity');
 const { BlobServiceClient } = require('@azure/storage-blob');
 const { SecretClient } = require('@azure/keyvault-secrets');
-const { MIGRATIONS, BOOTSTRAP_SQL, pendingMigrations } = require('../migrations');
+const { MIGRATIONS, BOOTSTRAP_SQL, ENSURE_ADMIN_SQL, pendingMigrations } = require('../migrations');
+const { applyChange, MAX_PRICE } = require('../domain/reprice');
 
 function createCredential(cfg) {
   if (cfg.runningInAzure) return new ManagedIdentityCredential({ clientId: cfg.managedIdentityClientId });
@@ -16,10 +17,21 @@ function createCredential(cfg) {
 
 const iso = (d) => (d ? new Date(d).toISOString() : null);
 const lower = (g) => (g ? String(g).toLowerCase() : g);
-const dup = (what) => Object.assign(new Error(`${what} already exists`), { code: 'DUPLICATE' });
+const dup = (what) => Object.assign(new Error(`${what} already exists`), { code: 'DUPLICATE', field: what });
+// a unique-index violation names the index: tell SKU and barcode clashes apart
+const dupProduct = (err) => dup(/ux_products_store_barcode/i.test(err.message || '') ? 'barcode' : 'sku');
 const byProduct = (lines) => [...lines].sort((a, b) => (a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0));
 const isDup = (err) => err && (err.number === 2627 || err.number === 2601);
 
+const parseJson = (v) => {
+  try {
+    return v ? JSON.parse(v) : null;
+  } catch {
+    return null;
+  }
+};
+const dateOnly = (d) => (d ? new Date(d).toISOString().slice(0, 10) : null);
+const toDate = (v) => (v ? new Date(`${v}T00:00:00Z`) : null);
 const mapStore = (r) =>
   r && {
     id: lower(r.id),
@@ -27,6 +39,7 @@ const mapStore = (r) =>
     name: r.name,
     currency: r.currency,
     refundWindowDays: r.refund_window_days ?? 30,
+    profile: parseJson(r.profile_json),
     createdAt: iso(r.created_at),
   };
 const mapUser = (r) =>
@@ -52,8 +65,18 @@ const mapProduct = (r) =>
     stock: r.stock,
     active: Boolean(r.active),
     refundable: r.refundable == null ? true : Boolean(r.refundable),
+    subcategory: r.subcategory ?? null,
+    barcode: r.barcode ?? null,
+    expiresOn: dateOnly(r.expires_on),
     updatedAt: iso(r.updated_at),
   };
+const mapCategory = (r) => ({
+  id: lower(r.id),
+  parentId: r.parent_id ? lower(r.parent_id) : null,
+  name: r.name,
+  finalSale: Boolean(r.final_sale),
+  createdAt: iso(r.created_at),
+});
 const mapSale = (r, lines = [], refunds = []) =>
   r && {
     id: lower(r.id),
@@ -139,7 +162,19 @@ const PRODUCT_COLS = {
   stock: ['stock', () => sql.Int],
   active: ['active', () => sql.Bit],
   refundable: ['refundable', () => sql.Bit],
+  subcategory: ['subcategory', () => sql.NVarChar(60)],
+  barcode: ['barcode', () => sql.NVarChar(32)],
+  expiresOn: ['expires_on', () => sql.Date],
 };
+const PRODUCT_COLUMN_VALUE = (k, v) => (k === 'expiresOn' ? toDate(v) : v);
+
+/** SQL for the price after a batch change (same arithmetic as domain/reprice.js). */
+function newPriceSql(price) {
+  if (!price) return 'price_cents';
+  if (price.mode === 'set') return '@pv';
+  if (price.mode === 'amount') return '(price_cents + @pv)';
+  return 'CAST(ROUND(price_cents * (10000.0 + @pv) / 10000.0, 0) AS INT)';
+}
 
 function createSqlDb(cfg, credential, log = console) {
   let poolPromise = null;
@@ -190,10 +225,51 @@ function createSqlDb(cfg, credential, log = console) {
       .input('st', sql.Int, p.stock ?? 0)
       .input('rf', sql.Bit, p.refundable ?? true)
       .input('a', sql.Bit, p.active ?? true)
+      .input('sc', sql.NVarChar(60), p.subcategory ?? null)
+      .input('bc', sql.NVarChar(32), p.barcode ?? null)
+      .input('ex', sql.Date, toDate(p.expiresOn))
       .query(
-        `INSERT INTO dbo.products(id, store_id, sku, name, category, price_cents, tax_rate_bp, stock, refundable, active)
-         VALUES (@id, @s, @sku, @n, @c, @pr, @t, @st, @rf, @a)`,
+        `INSERT INTO dbo.products(id, store_id, sku, name, category, price_cents, tax_rate_bp, stock, refundable, active, subcategory, barcode, expires_on)
+         VALUES (@id, @s, @sku, @n, @c, @pr, @t, @st, @rf, @a, @sc, @bc, @ex)`,
       );
+  }
+
+  /** SQL Server bulk load (TDS bulk copy) inside the caller's transaction. */
+  async function bulkInsertProducts(r, storeId, list) {
+    const t = new sql.Table('dbo.products');
+    t.create = false;
+    t.columns.add('id', sql.UniqueIdentifier, { nullable: false });
+    t.columns.add('store_id', sql.UniqueIdentifier, { nullable: false });
+    t.columns.add('sku', sql.NVarChar(40), { nullable: false });
+    t.columns.add('name', sql.NVarChar(120), { nullable: false });
+    t.columns.add('category', sql.NVarChar(60), { nullable: false });
+    t.columns.add('price_cents', sql.Int, { nullable: false });
+    t.columns.add('tax_rate_bp', sql.Int, { nullable: false });
+    t.columns.add('stock', sql.Int, { nullable: false });
+    t.columns.add('active', sql.Bit, { nullable: false });
+    t.columns.add('refundable', sql.Bit, { nullable: false });
+    t.columns.add('subcategory', sql.NVarChar(60), { nullable: true });
+    t.columns.add('barcode', sql.NVarChar(32), { nullable: true });
+    t.columns.add('expires_on', sql.Date, { nullable: true });
+    for (const p of list) {
+      t.rows.add(
+        p.id,
+        storeId,
+        p.sku,
+        p.name,
+        p.category ?? 'General',
+        p.priceCents,
+        p.taxRateBp ?? 1300,
+        p.stock ?? 0,
+        p.active ?? true,
+        p.refundable ?? true,
+        p.subcategory ?? null,
+        p.barcode ?? null,
+        toDate(p.expiresOn),
+      );
+    }
+    // checkConstraints: keep CHECK / FOREIGN KEY constraints checked (and trusted) during the bulk load
+    await r.bulk(t, { checkConstraints: true });
   }
 
   /** Updates the given fields of one product; returns rows affected. */
@@ -202,7 +278,7 @@ function createSqlDb(cfg, credential, log = console) {
     const sets = [];
     for (const [k, v] of Object.entries(patch)) {
       if (!(k in PRODUCT_COLS)) continue;
-      r.input(`f_${k}`, PRODUCT_COLS[k][1](), v);
+      r.input(`f_${k}`, PRODUCT_COLS[k][1](), PRODUCT_COLUMN_VALUE(k, v));
       sets.push(`${PRODUCT_COLS[k][0]} = @f_${k}`);
     }
     sets.push('updated_at = SYSUTCDATETIME()');
@@ -278,6 +354,9 @@ function createSqlDb(cfg, credential, log = console) {
             .input('a', sql.NVarChar(50), cfg.build.version)
             .query('INSERT INTO dbo.schema_migrations(version, name, app_version) VALUES (@v, @n, @a)');
         }
+        // Every start: a store without an admin (e.g. signed up on an older
+        // version during a slot swap or rollback) gets its first manager as admin.
+        await new sql.Request(tx).batch(ENSURE_ADMIN_SQL); // schema is at version 6+ here
         await tx.commit();
       } catch (err) {
         await tx.rollback().catch(() => {});
@@ -336,14 +415,18 @@ function createSqlDb(cfg, credential, log = console) {
 
     // ---- users -------------------------------------------------------------
     async findUserByEmail(storeId, email) {
-      const r = await (await req())
+      const r = await (
+        await req()
+      )
         .input('s', sql.UniqueIdentifier, storeId)
         .input('e', sql.NVarChar(254), email)
         .query('SELECT * FROM dbo.users WHERE store_id = @s AND email = @e');
       return mapUser(r.recordset[0]) || null;
     },
     async getUser(storeId, id) {
-      const r = await (await req())
+      const r = await (
+        await req()
+      )
         .input('s', sql.UniqueIdentifier, storeId)
         .input('id', sql.UniqueIdentifier, id)
         .query('SELECT * FROM dbo.users WHERE store_id = @s AND id = @id');
@@ -355,7 +438,9 @@ function createSqlDb(cfg, credential, log = console) {
     },
     async createUser(storeId, u) {
       try {
-        await (await req())
+        await (
+          await req()
+        )
           .input('id', sql.UniqueIdentifier, u.id)
           .input('s', sql.UniqueIdentifier, storeId)
           .input('e', sql.NVarChar(254), u.email)
@@ -369,8 +454,25 @@ function createSqlDb(cfg, credential, log = console) {
       }
       return this.getUser(storeId, u.id);
     },
+    async updateUser(storeId, id, patch) {
+      const r = await req();
+      r.input('s', sql.UniqueIdentifier, storeId).input('id', sql.UniqueIdentifier, id);
+      const sets = [];
+      if (patch.active !== undefined) {
+        r.input('a', sql.Bit, patch.active);
+        sets.push('active = @a');
+      }
+      if (patch.role !== undefined) {
+        r.input('r', sql.NVarChar(20), patch.role);
+        sets.push('role = @r');
+      }
+      if (sets.length) await r.query(`UPDATE dbo.users SET ${sets.join(', ')} WHERE store_id = @s AND id = @id`);
+      return this.getUser(storeId, id);
+    },
     async setUserActive(storeId, id, active) {
-      await (await req())
+      await (
+        await req()
+      )
         .input('s', sql.UniqueIdentifier, storeId)
         .input('id', sql.UniqueIdentifier, id)
         .input('a', sql.Bit, active)
@@ -379,13 +481,112 @@ function createSqlDb(cfg, credential, log = console) {
     },
 
     // ---- products ----------------------------------------------------------
-    async listProducts(storeId, { q = '', includeInactive = false } = {}) {
-      const r = await (await req())
+    /** Paged search: { items, total }. Filters are parameters, never string-built. */
+    async searchProducts(storeId, { q = '', includeInactive = false, category, subcategory, expiresBefore, limit = 50, offset = 0 } = {}) {
+      // filters: fixed SQL fragments + parameters (never user text in the SQL)
+      const where = ['store_id = @s', '(active = 1 OR @all = 1)'];
+      const params = [
+        ['s', sql.UniqueIdentifier, storeId],
+        ['all', sql.Bit, includeInactive],
+      ];
+      if (q) {
+        params.push(['q', sql.NVarChar(200), `%${q.replace(/[%_[]/g, (c) => `[${c}]`)}%`]);
+        if (q.length <= 32) {
+          params.push(['code', sql.NVarChar(32), q.toUpperCase()]);
+          where.push('(name LIKE @q OR sku LIKE @q OR barcode = @code)');
+        } else where.push('(name LIKE @q OR sku LIKE @q)');
+      }
+      if (category) {
+        params.push(['cat', sql.NVarChar(60), category]);
+        where.push('category = @cat');
+      }
+      if (subcategory) {
+        params.push(['sub', sql.NVarChar(60), subcategory]);
+        where.push('subcategory = @sub');
+      }
+      if (expiresBefore) {
+        params.push(['exb', sql.Date, toDate(expiresBefore)]);
+        where.push('expires_on IS NOT NULL AND expires_on <= @exb');
+      }
+      const bind = (r) => {
+        for (const [n, t, v] of params) r.input(n, t, v);
+        return r;
+      };
+      // id last: rows with equal names keep a stable order across pages
+      const order = expiresBefore ? 'expires_on, name, id' : 'name, id';
+      const res = await bind(await req())
+        .input('lim', sql.Int, limit)
+        .input('off', sql.Int, offset).query(`SELECT *, COUNT(*) OVER () AS total_rows FROM dbo.products WHERE ${where.join(' AND ')}
+                ORDER BY ${order} OFFSET @off ROWS FETCH NEXT @lim ROWS ONLY`);
+      let total = res.recordset[0]?.total_rows ?? 0;
+      if (res.recordset.length === 0 && offset > 0) {
+        // past the end: COUNT(*) OVER() has no row to ride on - count with the same filters
+        const c = await bind(await req()).query(`SELECT COUNT(*) AS n FROM dbo.products WHERE ${where.join(' AND ')}`);
+        total = c.recordset[0].n;
+      }
+      return { items: res.recordset.map(mapProduct), total };
+    },
+    async listProducts(storeId, opts = {}) {
+      return (await this.searchProducts(storeId, { ...opts, limit: 100000 })).items;
+    },
+    async findProductByCode(storeId, code) {
+      const r = await (
+        await req()
+      )
         .input('s', sql.UniqueIdentifier, storeId)
-        .input('q', sql.NVarChar(130), `%${q.replace(/[%_[]/g, (c) => `[${c}]`)}%`)
-        .input('all', sql.Bit, includeInactive)
-        .query('SELECT * FROM dbo.products WHERE store_id = @s AND (active = 1 OR @all = 1) AND (name LIKE @q OR sku LIKE @q) ORDER BY name');
+        .input('c', sql.NVarChar(40), code)
+        .query('SELECT TOP 1 * FROM dbo.products WHERE store_id = @s AND (barcode = @c OR sku = @c) ORDER BY CASE WHEN barcode = @c THEN 0 ELSE 1 END');
+      return mapProduct(r.recordset[0]) || null;
+    },
+    /** Products whose SKU or barcode is in the lists (JSON arrays: no 2100-parameter limit). */
+    async findProductsByCodes(storeId, { skus = [], barcodes = [] }) {
+      if (skus.length === 0 && barcodes.length === 0) return [];
+      const r = await (
+        await req()
+      )
+        .input('s', sql.UniqueIdentifier, storeId)
+        .input('skus', sql.NVarChar(sql.MAX), JSON.stringify(skus))
+        .input('codes', sql.NVarChar(sql.MAX), JSON.stringify(barcodes))
+        .query(`SELECT * FROM dbo.products WHERE store_id = @s AND (sku IN (SELECT value FROM OPENJSON(@skus))
+                  OR barcode IN (SELECT value FROM OPENJSON(@codes)))`);
       return r.recordset.map(mapProduct);
+    },
+    /**
+     * Batch price/tax change in ONE transaction and ONE UPDATE, however many
+     * products match (a whole department of a 200k catalogue). Nothing changes
+     * when a price would leave 0..MAX_PRICE or some listed ids are missing.
+     */
+    async repriceProducts(storeId, where, change, { dryRun = false, previewLimit = 50 } = {}) {
+      return inTransaction(async (r) => {
+        const bind = (q) => {
+          q.input('s', sql.UniqueIdentifier, storeId);
+          if (where.ids) q.input('ids', sql.NVarChar(sql.MAX), JSON.stringify(where.ids));
+          if (where.category) q.input('cat', sql.NVarChar(60), where.category);
+          if (change.price) q.input('pv', sql.Int, change.price.value);
+          q.input('tax', sql.Int, change.taxRateBp ?? null);
+          q.input('max', sql.Int, MAX_PRICE);
+          q.input('lim', sql.Int, previewLimit);
+          return q;
+        };
+        const filter = where.ids
+          ? 'id IN (SELECT TRY_CAST(value AS UNIQUEIDENTIFIER) FROM OPENJSON(@ids))' // not a GUID: no match -> 404
+          : where.category
+            ? '(category = @cat OR subcategory = @cat)'
+            : '1 = 1';
+        const expr = newPriceSql(change.price);
+        const scope = `FROM dbo.products WITH (UPDLOCK, HOLDLOCK) WHERE store_id = @s AND ${filter}`;
+        const head = await bind(r()).query(`SELECT COUNT(*) AS n FROM dbo.products WITH (UPDLOCK, HOLDLOCK) WHERE store_id = @s AND ${filter};
+          SELECT TOP 1 sku, ${expr} AS np ${scope} AND (${expr} < 0 OR ${expr} > @max);
+          SELECT TOP (@lim) * ${scope} ORDER BY name`);
+        const [[{ n }], badRows, previewRows] = head.recordsets;
+        const preview = previewRows.map(mapProduct).map((p) => applyChange(p, change));
+        const invalid = badRows[0] ? { sku: badRows[0].sku, priceCents: badRows[0].np } : null;
+        const result = { count: n, preview, invalid };
+        if (dryRun || invalid || (where.ids && n !== where.ids.length)) return result;
+        await bind(r()).query(`UPDATE dbo.products SET price_cents = ${expr}, tax_rate_bp = COALESCE(@tax, tax_rate_bp), updated_at = SYSUTCDATETIME()
+                               WHERE store_id = @s AND ${filter}`);
+        return result;
+      });
     },
     async getProductsByIds(storeId, ids) {
       if (ids.length === 0) return [];
@@ -402,7 +603,7 @@ function createSqlDb(cfg, credential, log = console) {
       try {
         await insertProduct(await req(), storeId, p);
       } catch (err) {
-        if (isDup(err)) throw dup('sku');
+        if (isDup(err)) throw dupProduct(err);
         throw err;
       }
       return (await this.getProductsByIds(storeId, [p.id]))[0];
@@ -411,7 +612,7 @@ function createSqlDb(cfg, credential, log = console) {
       try {
         await updateProductRow(await req(), storeId, id, patch);
       } catch (err) {
-        if (isDup(err)) throw dup('sku');
+        if (isDup(err)) throw dupProduct(err);
         throw err;
       }
       return (await this.getProductsByIds(storeId, [id]))[0] || null;
@@ -420,7 +621,10 @@ function createSqlDb(cfg, credential, log = console) {
     async saveProducts(storeId, items) {
       try {
         await inTransaction(async (r) => {
+          const creates = items.filter((i) => i.create);
+          if (creates.length > 20) await bulkInsertProducts(r(), storeId, creates); // big imports: one bulk load
           for (const { create, ...it } of items) {
+            if (create && creates.length > 20) continue;
             if (create) await insertProduct(r(), storeId, it);
             else {
               const n = await updateProductRow(r(), storeId, it.id, it);
@@ -429,30 +633,86 @@ function createSqlDb(cfg, credential, log = console) {
           }
         });
       } catch (err) {
-        if (isDup(err)) throw dup('sku');
+        if (isDup(err)) throw dupProduct(err);
         throw err;
       }
-      return this.getProductsByIds(storeId, items.map((i) => i.id));
+      return this.getProductsByIds(
+        storeId,
+        items.map((i) => i.id),
+      );
     },
 
     // ---- store settings and promotions --------------------------------------
     async updateStoreSettings(id, patch) {
+      const r = await req();
+      r.input('id', sql.UniqueIdentifier, id);
+      const sets = [];
       if (patch.refundWindowDays !== undefined) {
-        await (await req())
-          .input('id', sql.UniqueIdentifier, id)
-          .input('d', sql.Int, patch.refundWindowDays)
-          .query('UPDATE dbo.stores SET refund_window_days = @d WHERE id = @id');
+        r.input('d', sql.Int, patch.refundWindowDays);
+        sets.push('refund_window_days = @d');
       }
+      if (patch.profile !== undefined) {
+        r.input('p', sql.NVarChar(sql.MAX), patch.profile ? JSON.stringify(patch.profile) : null);
+        sets.push('profile_json = @p');
+      }
+      if (patch.name !== undefined) {
+        r.input('n', sql.NVarChar(120), patch.name);
+        sets.push('name = @n');
+      }
+      if (sets.length) await r.query(`UPDATE dbo.stores SET ${sets.join(', ')} WHERE id = @id`);
       return this.getStore(id);
     },
+
+    // ---- categories --------------------------------------------------------
+    async listCategories(storeId) {
+      const r = await (await req()).input('s', sql.UniqueIdentifier, storeId).query('SELECT * FROM dbo.categories WHERE store_id = @s ORDER BY name');
+      return r.recordset.map(mapCategory);
+    },
+    async createCategory(storeId, c) {
+      try {
+        await (
+          await req()
+        )
+          .input('id', sql.UniqueIdentifier, c.id)
+          .input('s', sql.UniqueIdentifier, storeId)
+          .input('p', sql.UniqueIdentifier, c.parentId || null)
+          .input('n', sql.NVarChar(60), c.name)
+          .input('f', sql.Bit, Boolean(c.finalSale))
+          .query('INSERT INTO dbo.categories(id, store_id, parent_id, name, final_sale) VALUES (@id, @s, @p, @n, @f)');
+      } catch (err) {
+        if (isDup(err)) throw dup('category');
+        throw err;
+      }
+      return (await this.listCategories(storeId)).find((x) => x.id === lower(c.id));
+    },
+    async updateCategory(storeId, id, patch) {
+      const r = await req();
+      r.input('s', sql.UniqueIdentifier, storeId).input('id', sql.UniqueIdentifier, id);
+      const sets = [];
+      if (patch.name !== undefined) {
+        r.input('n', sql.NVarChar(60), patch.name);
+        sets.push('name = @n');
+      }
+      if (patch.finalSale !== undefined) {
+        r.input('f', sql.Bit, patch.finalSale);
+        sets.push('final_sale = @f');
+      }
+      try {
+        if (sets.length) await r.query(`UPDATE dbo.categories SET ${sets.join(', ')} WHERE store_id = @s AND id = @id`);
+      } catch (err) {
+        if (isDup(err)) throw dup('category');
+        throw err;
+      }
+      return (await this.listCategories(storeId)).find((x) => x.id === lower(id)) || null;
+    },
     async listPromotions(storeId) {
-      const r = await (await req())
-        .input('s', sql.UniqueIdentifier, storeId)
-        .query('SELECT * FROM dbo.promotions WHERE store_id = @s ORDER BY starts_at DESC');
+      const r = await (await req()).input('s', sql.UniqueIdentifier, storeId).query('SELECT * FROM dbo.promotions WHERE store_id = @s ORDER BY starts_at DESC');
       return r.recordset.map(mapPromotion);
     },
     async createPromotion(storeId, p) {
-      await (await req())
+      await (
+        await req()
+      )
         .input('id', sql.UniqueIdentifier, p.id)
         .input('s', sql.UniqueIdentifier, storeId)
         .input('n', sql.NVarChar(120), p.name)
@@ -468,7 +728,12 @@ function createSqlDb(cfg, credential, log = console) {
       return (await this.listPromotions(storeId)).find((x) => x.id === lower(p.id));
     },
     async updatePromotion(storeId, id, patch) {
-      const cols = { name: ['name', sql.NVarChar(120)], active: ['active', sql.Bit], endsAt: ['ends_at', sql.DateTime2], startsAt: ['starts_at', sql.DateTime2] };
+      const cols = {
+        name: ['name', sql.NVarChar(120)],
+        active: ['active', sql.Bit],
+        endsAt: ['ends_at', sql.DateTime2],
+        startsAt: ['starts_at', sql.DateTime2],
+      };
       const r = await req();
       r.input('s', sql.UniqueIdentifier, storeId).input('id', sql.UniqueIdentifier, id);
       const sets = [];
@@ -545,7 +810,9 @@ function createSqlDb(cfg, credential, log = console) {
       return saved;
     },
     async getSale(storeId, id) {
-      const r = await (await req())
+      const r = await (
+        await req()
+      )
         .input('s', sql.UniqueIdentifier, storeId)
         .input('id', sql.UniqueIdentifier, id)
         .query('SELECT * FROM dbo.sales WHERE store_id = @s AND id = @id');
@@ -554,7 +821,9 @@ function createSqlDb(cfg, credential, log = console) {
       return mapSale(r.recordset[0], lines.get(lower(id)) || [], refunds.get(lower(id)) || []);
     },
     async listSales(storeId, { from, to, limit = 50 } = {}) {
-      const r = await (await req())
+      const r = await (
+        await req()
+      )
         .input('s', sql.UniqueIdentifier, storeId)
         .input('from', sql.DateTime2, from ? new Date(from) : new Date(0))
         .input('to', sql.DateTime2, to ? new Date(to) : new Date('9999-12-31'))
@@ -672,8 +941,39 @@ function createSecretAdapter(cfg, credential) {
         throw err;
       }
     },
+    // Delete every version, then purge when allowed. Key Vault soft delete keeps
+    // a deleted name reserved until it is purged or recovered (see set()).
+    async remove(name) {
+      try {
+        await (await client.beginDeleteSecret(name)).pollUntilDone();
+      } catch (err) {
+        if (err.statusCode === 404) return;
+        throw err;
+      }
+      await client.purgeDeletedSecret(name).catch(() => {}); // needs purge permission; otherwise expires with the retention period
+    },
     async set(name, value) {
-      await client.setSecret(name, value, { contentType: 'eurc/hmac-key' });
+      const put = () => client.setSecret(name, value, { contentType: name.startsWith('bank-') ? 'eurc/bank' : 'eurc/hmac-key' });
+      try {
+        await put();
+      } catch (err) {
+        if (err.statusCode !== 409) throw err;
+        // the name is soft-deleted: purge it if we may, otherwise recover it and
+        // disable the recovered (old) versions before writing the new value
+        const purged = await client.purgeDeletedSecret(name).then(
+          () => true,
+          () => false,
+        );
+        if (!purged) {
+          await (await client.beginRecoverDeletedSecret(name)).pollUntilDone();
+          for await (const v of client.listPropertiesOfSecretVersions(name)) {
+            if (v.enabled) await client.updateSecretProperties(name, v.version, { enabled: false });
+          }
+        } else {
+          await new Promise((res) => setTimeout(res, 2000)); // purge completes asynchronously
+        }
+        await put();
+      }
     },
   };
 }

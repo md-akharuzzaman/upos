@@ -2,8 +2,10 @@ import { useCallback, useState } from 'react';
 import { api } from '../api.js';
 import { formatMoney, parseMoney } from '../lib/money.js';
 import { useLoader } from '../lib/useLoader.js';
+import ProductPicker from './ProductPicker.jsx';
+import { categoryOptions } from '../lib/categories.js';
 
-const EMPTY = { name: '', kind: 'percent', value: '', target: 'all', category: '', skus: '', from: '', to: '' };
+const EMPTY = { name: '', kind: 'percent', value: '', target: 'all', category: '', skus: [], from: '', to: '' };
 
 /** Local date (YYYY-MM-DD from <input type=date>) -> ISO at local midnight. */
 const startOfDay = (d) => new Date(`${d}T00:00:00`).toISOString();
@@ -21,6 +23,8 @@ export default function Promotions({ token, currency, onAuthError }) {
   const [error, setError] = useState('');
   const fetchRows = useCallback(() => api('/api/promotions', { token }), [token]);
   const [rows, load, loadError] = useLoader(fetchRows, onAuthError, []);
+  const fetchCats = useCallback(() => api('/api/categories', { token }).catch(() => []), [token]);
+  const [cats] = useLoader(fetchCats, onAuthError, []);
 
   async function add(e) {
     e.preventDefault();
@@ -29,7 +33,10 @@ export default function Promotions({ token, currency, onAuthError }) {
     if (!value || value < 1) return setError(form.kind === 'percent' ? 'Enter a percentage, e.g. 15' : 'Enter an amount, e.g. 0.50');
     const body = { name: form.name, kind: form.kind, value, target: form.target };
     if (form.target === 'category') body.category = form.category;
-    if (form.target === 'skus') body.skus = form.skus.split(/[\s,;]+/).filter(Boolean);
+    if (form.target === 'skus') {
+      if (form.skus.length === 0) return setError('Choose at least one product');
+      body.skus = form.skus;
+    }
     if (form.from) body.startsAt = startOfDay(form.from);
     // "to" is the last day of the offer, inclusive: it ends at the next midnight
     if (form.to) body.endsAt = endOfDay(form.to);
@@ -82,15 +89,21 @@ export default function Promotions({ token, currency, onAuthError }) {
         {form.target === 'category' && (
           <label>
             Category
-            <input value={form.category} onChange={set('category')} required />
+            {cats.length ? (
+              <select value={form.category} onChange={set('category')} required>
+                <option value="">— choose —</option>
+                {categoryOptions(cats).map((o) => (
+                  <option key={o.key} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input value={form.category} onChange={set('category')} required />
+            )}
           </label>
         )}
-        {form.target === 'skus' && (
-          <label className="grow">
-            SKUs
-            <input value={form.skus} onChange={set('skus')} required placeholder="COF-001, TEA-001" />
-          </label>
-        )}
+        {form.target === 'skus' && <ProductPicker token={token} label="SKUs" value={form.skus} onChange={(skus) => setForm({ ...form, skus })} />}
         <label>
           From
           <input type="date" value={form.from} onChange={set('from')} />
@@ -102,8 +115,8 @@ export default function Promotions({ token, currency, onAuthError }) {
         <button className="primary">Create promotion</button>
       </form>
       <p className="hint">
-        The best running promotion applies automatically at the till (they never stack). Tax is charged on the discounted price. Leave “From” empty to start now and “To”
-        empty to run until you end it.
+        The best running promotion applies automatically at the till (they never stack). Tax is charged on the discounted price. Leave “From” empty to start now
+        and “To” empty to run until you end it.
       </p>
       {(error || loadError) && (
         <p className="error" role="alert">

@@ -144,7 +144,8 @@ test.describe('eURC POS', () => {
     await page.getByLabel('Name', { exact: true }).fill('E2E coffee half price');
     await page.getByLabel('Percent', { exact: true }).fill('50');
     await page.getByLabel('Applies to').selectOption('skus');
-    await page.getByLabel('SKUs', { exact: true }).fill('COF-001');
+    await page.getByLabel('Search SKUs').fill('COF');
+    await page.getByRole('option', { name: /COF-001/ }).click();
     await page.getByRole('button', { name: 'Create promotion' }).click();
     await expect(page.getByText('running', { exact: true })).toBeVisible();
 
@@ -158,5 +159,25 @@ test.describe('eURC POS', () => {
     await page.getByRole('button', { name: 'Complete sale' }).click();
     await expect(page.getByTestId('receipt-savings')).toHaveText('$1.23');
     await expect(page.getByTestId('receipt-policy')).toContainText('Refunds within 30 days');
+  });
+
+  test('manager gives a product a barcode; the register adds it on scan (v2.3)', async ({ page }) => {
+    await page.goto('/');
+    await page.getByLabel('Store code').fill(slug);
+    await page.getByLabel('E-mail').fill(`erin@${slug}.test`);
+    await page.getByLabel('Password').fill(PASSWORD);
+    await page.getByRole('button', { name: 'Sign in' }).last().click();
+    await page.getByRole('button', { name: 'Products' }).click();
+    await page.getByRole('button', { name: 'Edit price and tax of COF-001' }).click();
+    await page.getByLabel('Barcode for COF-001').fill('4006381333931');
+    await page.getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByText('4006381333931')).toBeVisible();
+
+    await page.getByRole('button', { name: 'Register' }).click();
+    // a USB scanner types the digits and presses Enter
+    await page.getByLabel('Search products').fill('4006381333931');
+    await page.getByLabel('Search products').press('Enter');
+    await expect(page.getByText('Added Coffee, medium')).toBeVisible();
+    await expect(page.getByRole('list').getByText('Coffee, medium')).toBeVisible();
   });
 });

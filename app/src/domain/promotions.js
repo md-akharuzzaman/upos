@@ -22,7 +22,11 @@ function isRunning(p, now = new Date()) {
 
 function appliesTo(p, product) {
   if (p.target === 'all') return true;
-  if (p.target === 'category') return String(p.category || '').toLowerCase() === String(product.category || '').toLowerCase();
+  if (p.target === 'category') {
+    // a promotion on a category also covers products whose sub-category has that name
+    const c = String(p.category || '').toLowerCase();
+    return c === String(product.category || '').toLowerCase() || c === String(product.subcategory || '').toLowerCase();
+  }
   return (p.skus || []).includes(product.sku);
 }
 

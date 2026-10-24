@@ -7,6 +7,20 @@ export default function Receipt({ receipt, onClose, closeLabel = 'New sale', ext
       <div className="card dialog receipt">
         <div className="printable">
           <h2>{receipt.store?.name}</h2>
+          {(receipt.store?.legalName || receipt.store?.address) && (
+            <p className="muted biz" data-testid="receipt-business">
+              {receipt.store.legalName}
+              {receipt.store.legalName && receipt.store.address && <br />}
+              {receipt.store.address}
+              {receipt.store.phone && <> · {receipt.store.phone}</>}
+              {receipt.store.taxNumbers?.length > 0 && (
+                <>
+                  <br />
+                  {receipt.store.taxNumbers.join(' · ')}
+                </>
+              )}
+            </p>
+          )}
           <p className="muted">
             Receipt <b>#{receipt.receiptNo}</b> · {new Date(receipt.createdAt).toLocaleString('en-CA')}
             <br />

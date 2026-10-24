@@ -7,20 +7,24 @@ import Sales from './components/Sales.jsx';
 import Report from './components/Report.jsx';
 import Team from './components/Team.jsx';
 import Promotions from './components/Promotions.jsx';
+import Business from './components/Business.jsx';
+import { can, ROLE_LABELS } from './lib/permissions.js';
 
+// Each screen needs one permission (lib/permissions.js; the API checks again).
 const TABS = [
-  { id: 'register', label: 'Register' },
-  { id: 'sales', label: 'Sales' },
-  { id: 'products', label: 'Products', manager: true },
-  { id: 'promotions', label: 'Promotions', manager: true },
-  { id: 'report', label: 'Report', manager: true },
-  { id: 'team', label: 'Staff', manager: true },
+  { id: 'register', label: 'Register', permission: 'sales.create' },
+  { id: 'sales', label: 'Sales', permission: 'sales.view' },
+  { id: 'products', label: 'Products', permission: 'products.manage' },
+  { id: 'promotions', label: 'Promotions', permission: 'promotions.manage' },
+  { id: 'report', label: 'Report', permission: 'reports.view' },
+  { id: 'team', label: 'Staff', permission: 'staff.manage' },
+  { id: 'business', label: 'Business', permission: 'business.profile' },
 ];
 
 export default function App() {
   const [info, setInfo] = useState(null);
   const [s, setS] = useState(() => session.load());
-  const [tab, setTab] = useState('register');
+  const [chosen, setTab] = useState('register');
 
   useEffect(() => {
     api('/api/info')
@@ -40,6 +44,9 @@ export default function App() {
   };
 
   const env = info?.environment;
+  const tabs = s ? TABS.filter((t) => can(s.user, t.permission)) : [];
+  // e.g. Customer support cannot use the register: open their first screen instead
+  const tab = tabs.some((t) => t.id === chosen) ? chosen : tabs[0]?.id;
   return (
     <div className="app" data-env={env || 'local'}>
       <header className="topbar">
@@ -54,7 +61,7 @@ export default function App() {
         )}
         {s && (
           <span className="who">
-            {s.user.name} ({s.user.role})
+            {s.user.name} ({ROLE_LABELS[s.user.role] || s.user.role})
             <button className="link light" onClick={signOut}>
               Sign out
             </button>
@@ -66,7 +73,7 @@ export default function App() {
       ) : (
         <>
           <nav className="tabs" aria-label="Sections">
-            {TABS.filter((t) => !t.manager || s.user.role === 'manager').map((t) => (
+            {tabs.map((t) => (
               <button key={t.id} aria-current={tab === t.id ? 'page' : undefined} onClick={() => setTab(t.id)}>
                 {t.label}
               </button>
@@ -74,19 +81,37 @@ export default function App() {
           </nav>
           <main>
             {tab === 'register' && <Register token={s.token} currency={s.store.currency} onAuthError={signOut} />}
-            {tab === 'sales' && <Sales token={s.token} currency={s.store.currency} isManager={s.user.role === 'manager'} onAuthError={signOut} />}
-            {tab === 'products' && <Products token={s.token} currency={s.store.currency} onAuthError={signOut} />}
+            {tab === 'sales' && (
+              <Sales
+                token={s.token}
+                currency={s.store.currency}
+                canRefund={can(s.user, 'refunds.create')}
+                canOverride={can(s.user, 'refunds.override')}
+                onAuthError={signOut}
+              />
+            )}
+            {tab === 'products' && (
+              <Products token={s.token} currency={s.store.currency} canEditCategories={can(s.user, 'categories.manage')} onAuthError={signOut} />
+            )}
             {tab === 'report' && <Report token={s.token} currency={s.store.currency} onAuthError={signOut} />}
             {tab === 'promotions' && <Promotions token={s.token} currency={s.store.currency} onAuthError={signOut} />}
             {tab === 'team' && (
-              <Team token={s.token} me={s.user} store={s.store} onStoreChange={(store) => signedIn({ ...s, store })} onAuthError={signOut} />
+              <Team
+                token={s.token}
+                me={s.user}
+                store={s.store}
+                canEditPolicy={can(s.user, 'store.settings')}
+                onStoreChange={(store) => signedIn({ ...s, store })}
+                onAuthError={signOut}
+              />
+            )}
+            {tab === 'business' && (
+              <Business token={s.token} onStoreChange={(store) => signedIn({ ...s, store: { ...s.store, ...store } })} onAuthError={signOut} />
             )}
           </main>
         </>
       )}
-      <footer className="foot">
-        eURC POS · {info ? `${info.version} (${info.commit}) · ${info.region}` : 'offline'} · delivered by GitHub Actions
-      </footer>
+      <footer className="foot">eURC POS · {info ? `${info.version} (${info.commit}) · ${info.region}` : 'offline'} · delivered by GitHub Actions</footer>
     </div>
   );
 }

@@ -5,7 +5,7 @@ import { formatMoney, refundPreview } from '../lib/money.js';
 // Manager-only: refund chosen items from a receipt. The server re-prices and
 // re-checks everything (including the store's refund policy); this screen
 // only previews the amount and explains the policy.
-export default function RefundItems({ receipt, token, onCancel, onDone, now: nowProp }) {
+export default function RefundItems({ receipt, token, onCancel, onDone, now: nowProp, canOverride = true }) {
   const c = receipt.store?.currency || 'CAD';
   const [opened] = useState(() => Date.now()); // the moment the dialog opened
   const now = nowProp ?? opened;
@@ -97,14 +97,11 @@ export default function RefundItems({ receipt, token, onCancel, onDone, now: now
             ))}
           </tbody>
         </table>
-        <button
-          type="button"
-          className="link"
-          onClick={() => setQty(Object.fromEntries(receipt.lines.filter(allowed).map((l) => [l.lineNo, left(l)])))}
-        >
+        <button type="button" className="link" onClick={() => setQty(Object.fromEntries(receipt.lines.filter(allowed).map((l) => [l.lineNo, left(l)])))}>
           Select everything left
         </button>
-        {policyBlocks && (
+        {policyBlocks && !canOverride && <p className="hint">Only an Admin or Manager can refund outside the store policy.</p>}
+        {policyBlocks && canOverride && (
           <label className="check">
             <input type="checkbox" checked={override} onChange={(e) => setOverride(e.target.checked)} />
             Override the store refund policy (manager) — a reason is required and recorded

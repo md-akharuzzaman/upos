@@ -16,7 +16,11 @@ export function isRunning(p, now = new Date()) {
 
 function appliesTo(p, product) {
   if (p.target === 'all') return true;
-  if (p.target === 'category') return String(p.category || '').toLowerCase() === String(product.category || '').toLowerCase();
+  if (p.target === 'category') {
+    // a promotion on a category also covers products whose sub-category has that name
+    const c = String(p.category || '').toLowerCase();
+    return c === String(product.category || '').toLowerCase() || c === String(product.subcategory || '').toLowerCase();
+  }
   return (p.skus || []).includes(product.sku);
 }
 
@@ -61,7 +65,9 @@ export function formatMoney(cents, currency = 'CAD') {
 
 /** "12.5" -> 1250 ; returns null for invalid input */
 export function parseMoney(text) {
-  const s = String(text ?? '').trim().replace(/[$,\s]/g, '');
+  const s = String(text ?? '')
+    .trim()
+    .replace(/[$,\s]/g, '');
   if (!/^\d+(\.\d{0,2})?$/.test(s)) return null;
   const [d, c = ''] = s.split('.');
   return Number(d) * 100 + Number(c.padEnd(2, '0'));
@@ -71,7 +77,10 @@ export function parseMoney(text) {
 export function quickTenders(totalCents) {
   const out = new Set([totalCents]);
   for (const step of [500, 1000, 2000, 5000, 10000]) out.add(Math.ceil(totalCents / step) * step);
-  return [...out].filter((v) => v >= totalCents).sort((a, b) => a - b).slice(0, 5);
+  return [...out]
+    .filter((v) => v >= totalCents)
+    .sort((a, b) => a - b)
+    .slice(0, 5);
 }
 
 /**

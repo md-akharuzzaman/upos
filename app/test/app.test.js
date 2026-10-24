@@ -84,8 +84,8 @@ describe('stores, sign-in and roles', () => {
     assert.equal((await ctx.call('POST', '/api/stores', { body: taken })).status, 409);
   });
 
-  test('sign-up returns a manager session; the signing key is kept in Key Vault', async () => {
-    assert.equal(mgr.user.role, 'manager');
+  test('sign-up returns an admin session (v2.3: the store owner is Admin); the signing key is kept in Key Vault', async () => {
+    assert.equal(mgr.user.role, 'admin');
     assert.equal(mgr.user.passwordHash, undefined);
     assert.ok(ctx.secrets.secrets.get('pos-token-signing-key').length >= 40);
     const me = await ctx.call('GET', '/api/me', { token: mgr.token });
@@ -149,7 +149,10 @@ describe('products, checkout, receipts, refunds and reports', () => {
     assert.equal((await ctx.call('POST', '/api/products', { token: mgr.token, body: { sku: 'COF-001', name: 'x', priceCents: 1 } })).status, 409);
     assert.equal((await ctx.call('POST', '/api/products', { token: mgr.token, body: { sku: 'A', name: 'x', priceCents: -1 } })).status, 400);
     const list = await ctx.call('GET', '/api/products?q=muff', { token: mgr.token });
-    assert.deepEqual(list.body.map((p) => p.sku), ['BAK-002']);
+    assert.deepEqual(
+      list.body.map((p) => p.sku),
+      ['BAK-002'],
+    );
   });
 
   let sale;
@@ -180,7 +183,13 @@ describe('products, checkout, receipts, refunds and reports', () => {
   test('not enough stock -> 409 and nothing changes (all-or-nothing)', async () => {
     const r = await ctx.call('POST', '/api/sales', {
       token: mgr.token,
-      body: { items: [{ productId: coffee.id, qty: 1 }, { productId: muffin.id, qty: 5 }], payment: { method: 'card', reference: 'AUTH-1' } },
+      body: {
+        items: [
+          { productId: coffee.id, qty: 1 },
+          { productId: muffin.id, qty: 5 },
+        ],
+        payment: { method: 'card', reference: 'AUTH-1' },
+      },
     });
     assert.equal(r.status, 409);
     const p = (await ctx.call('GET', '/api/products', { token: mgr.token })).body;

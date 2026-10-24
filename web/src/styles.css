@@ -137,3 +137,28 @@ tr.bad td { color: var(--bad); }
 label.check { flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; text-align: left; }
 label.check input[type='checkbox'], label.check input[type='radio'] { width: auto; flex: none; margin: 0; }
 label.check select, label.check input:not([type]) { width: auto; }
+
+/* v2.3 foundations */
+.form-grid { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.form-grid fieldset { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 16px; align-items: end; }
+.form-grid .wide { grid-column: 1 / -1; }
+.pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding: 8px 0; font-size: 13px; color: var(--muted); }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 8px 0; }
+.filters label { min-width: 160px; }
+.badge.grey { background: #eef1f5; color: var(--muted); }
+.tile.expired { opacity: .55; }
+.t-expiry { font-size: 11px; font-weight: 600; color: #8a4b00; }
+.scan-row { display: flex; gap: 8px; }
+.scan-row input { flex: 1; }
+.cat-tree ul { list-style: none; margin: 0; padding-left: 18px; }
+.cat-tree li { padding: 3px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.picker { position: relative; }
+.picker .suggest { position: absolute; z-index: 5; left: 0; right: 0; top: 100%; background: #fff; border: 1px solid var(--line); border-radius: 8px; max-height: 220px; overflow: auto; margin: 2px 0 0; padding: 4px; list-style: none; }
+.picker .suggest button { width: 100%; text-align: left; border: 0; background: none; padding: 6px 8px; }
+.picker .suggest button:hover { background: #f1f5fb; }
+.chips-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips-list .chip { display: inline-flex; gap: 4px; align-items: center; }
+.progress { height: 10px; background: #eef1f5; border-radius: 6px; overflow: hidden; }
+.progress > span { display: block; height: 100%; background: var(--azure); transition: width .2s; }
+.receipt .biz { font-size: 12px; margin: 0; }
+.block { display: block; }

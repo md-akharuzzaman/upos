@@ -4,12 +4,18 @@
 // register stays small and fast.
 import { parseMoney } from './money.js';
 
-export const COLUMNS = ['SKU', 'Name', 'Category', 'Price', 'Tax %', 'Stock', 'Refundable', 'Active'];
+export const COLUMNS = ['SKU', 'Barcode', 'Name', 'Category', 'Sub-category', 'Price', 'Tax %', 'Stock', 'Expiry date', 'Refundable', 'Active'];
 
 const KEYS = {
   sku: 'sku',
   name: 'name',
   category: 'category',
+  'sub-category': 'subcategory',
+  subcategory: 'subcategory',
+  barcode: 'barcode',
+  'expiry date': 'expiresOn',
+  expiry: 'expiresOn',
+  'best before': 'expiresOn',
   price: 'price',
   'tax %': 'tax',
   tax: 'tax',
@@ -33,7 +39,14 @@ const yes = (v) => {
  */
 export function rowsToProducts(sheet) {
   const [head = [], ...body] = sheet;
-  const keys = head.map((h) => KEYS[String(h ?? '').trim().toLowerCase()]);
+  const keys = head.map(
+    (h) =>
+      KEYS[
+        String(h ?? '')
+          .trim()
+          .toLowerCase()
+      ],
+  );
   const problems = [];
   if (!keys.includes('sku')) problems.push('The first row must contain the headings, including SKU.');
   head.forEach((h, i) => {
@@ -51,6 +64,13 @@ export function rowsToProducts(sheet) {
     if (raw.sku !== undefined) r.sku = String(raw.sku).trim();
     if (raw.name !== undefined) r.name = String(raw.name).trim();
     if (raw.category !== undefined) r.category = String(raw.category).trim();
+    if (raw.subcategory !== undefined) r.subcategory = String(raw.subcategory).trim();
+    if (raw.barcode !== undefined) r.barcode = String(raw.barcode).trim();
+    if (raw.expiresOn !== undefined) {
+      const v = raw.expiresOn instanceof Date ? raw.expiresOn.toISOString().slice(0, 10) : String(raw.expiresOn).trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) problems.push(`Row ${row}: expiry date "${raw.expiresOn}" must be YYYY-MM-DD.`);
+      else r.expiresOn = v;
+    }
     if (raw.price !== undefined) {
       const cents = typeof raw.price === 'number' ? Math.round(raw.price * 100) : parseMoney(raw.price);
       if (cents == null) problems.push(`Row ${row}: price "${raw.price}" is not a number.`);
@@ -122,17 +142,33 @@ export function productsToSheet(products = []) {
   const bold = (value) => ({ value, fontWeight: 'bold' });
   const rows = products.map((p) => [
     { value: p.sku },
+    { value: p.barcode || '' },
     { value: p.name },
     { value: p.category },
+    { value: p.subcategory || '' },
     { value: p.priceCents / 100, type: Number, format: '0.00' },
     { value: p.taxRateBp / 100, type: Number },
     { value: p.stock, type: Number },
+    { value: p.expiresOn || '' },
     { value: p.refundable === false ? 'No' : 'Yes' },
     { value: p.active === false ? 'No' : 'Yes' },
   ]);
   if (products.length === 0) {
-    rows.push([{ value: 'COF-001' }, { value: 'Coffee, medium' }, { value: 'Drinks' }, { value: 2.45, type: Number }, { value: 13, type: Number }, { value: 20, type: Number }, { value: 'Yes' }, { value: 'Yes' }]);
-    rows.push([{ value: 'SAN-001' }, { value: 'Ham sandwich' }, { value: 'Food' }, { value: 6.5, type: Number }, { value: 13, type: Number }, { value: 10, type: Number }, { value: 'No' }, { value: 'Yes' }]);
+    const ex = (sku, code, name, cat, sub, price, tax, stock, expiry, refundable) => [
+      { value: sku },
+      { value: code },
+      { value: name },
+      { value: cat },
+      { value: sub },
+      { value: price, type: Number },
+      { value: tax, type: Number },
+      { value: stock, type: Number },
+      { value: expiry },
+      { value: refundable },
+      { value: 'Yes' },
+    ];
+    rows.push(ex('COF-001', '2000000000015', 'Coffee, medium', 'Drinks', 'Coffee', 2.45, 13, 20, '', 'Yes'));
+    rows.push(ex('SAN-001', '2000000000022', 'Ham sandwich', 'Food', 'Sandwiches', 6.5, 13, 10, '2026-12-31', 'No'));
   }
   return [COLUMNS.map(bold), ...rows];
 }
@@ -141,7 +177,19 @@ export function productsToSheet(products = []) {
 export async function downloadProducts(products, fileName) {
   const { default: writeExcelFile } = await import('write-excel-file/universal');
   const blob = await writeExcelFile(productsToSheet(products), {
-    columns: [{ width: 12 }, { width: 32 }, { width: 14 }, { width: 10 }, { width: 8 }, { width: 8 }, { width: 11 }, { width: 8 }],
+    columns: [
+      { width: 12 },
+      { width: 15 },
+      { width: 36 },
+      { width: 14 },
+      { width: 16 },
+      { width: 9 },
+      { width: 7 },
+      { width: 7 },
+      { width: 12 },
+      { width: 11 },
+      { width: 8 },
+    ],
   }).toBlob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
