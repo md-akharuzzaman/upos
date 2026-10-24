@@ -91,7 +91,7 @@ test.describe('eURC POS', () => {
     await expect(page.getByRole('button', { name: 'Add Blueberry muffin' })).toBeDisabled();
   });
 
-  test('cashier takes a card payment with a terminal approval code', async ({ page }) => {
+  test('cashier takes a debit payment with a terminal approval code', async ({ page }) => {
     await page.goto('/');
     await page.getByLabel('Store code').fill(slug);
     await page.getByLabel('E-mail').fill(`casey@${slug}.test`);
@@ -99,10 +99,11 @@ test.describe('eURC POS', () => {
     await page.getByRole('button', { name: 'Sign in' }).last().click();
     await page.getByRole('button', { name: 'Add Coffee, medium' }).click();
     await page.getByRole('button', { name: /Charge/ }).click();
-    await page.getByRole('radio', { name: 'Card' }).click();
+    await page.getByRole('radio', { name: 'Debit' }).click();
     await page.getByLabel('Terminal approval code').fill('AUTH-7731');
     await page.getByRole('button', { name: 'Complete sale' }).click();
     await expect(page.getByText('AUTH-7731')).toBeVisible();
+    await expect(page.getByText('Debit (Interac)')).toBeVisible();
   });
 
   test('manager sees the day in the report, refunds one item, then the rest', async ({ page }) => {
@@ -117,7 +118,7 @@ test.describe('eURC POS', () => {
     await expect(page.getByTestId('report-gross')).toHaveText('$11.26');
 
     await page.getByRole('button', { name: 'Sales' }).click();
-    await page.getByRole('cell', { name: 'cash', exact: true }).click();
+    await page.getByRole('cell', { name: 'Cash', exact: true }).click();
     // v2.1: give back one coffee only ($2.45 + 32 ¢ HST)
     await page.getByRole('button', { name: 'Refund items' }).click();
     await page.getByLabel('Refund quantity for Coffee, medium').fill('1');
@@ -179,5 +180,21 @@ test.describe('eURC POS', () => {
     await page.getByLabel('Search products').press('Enter');
     await expect(page.getByText('Added Coffee, medium')).toBeVisible();
     await expect(page.getByRole('list').getByText('Coffee, medium')).toBeVisible();
+  });
+
+  test('manager opens the GST/HST report for the month (v2.4)', async ({ page }) => {
+    await page.goto('/');
+    await page.getByLabel('Store code').fill(slug);
+    await page.getByLabel('E-mail').fill(`erin@${slug}.test`);
+    await page.getByLabel('Password').fill(PASSWORD);
+    await page.getByRole('button', { name: 'Sign in' }).last().click();
+    await page.getByRole('button', { name: 'GST/HST' }).click();
+    await expect(page.getByRole('heading', { name: 'GST/HST report' })).toBeVisible();
+    // the day's coffees were sold at 13 % HST
+    await expect(page.getByRole('table', { name: 'By tax rate' }).getByText('HST 13 %')).toBeVisible();
+    await expect(page.getByTestId('tax-line103')).toHaveText(/^\$\d+\.\d{2}$/);
+    const download = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Export to Excel' }).click();
+    expect((await download).suggestedFilename()).toMatch(/^gst-hst-\d{4}-\d{2}-01-to-\d{4}-\d{2}-\d{2}\.xlsx$/);
   });
 });
