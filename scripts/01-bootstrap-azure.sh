@@ -59,17 +59,30 @@ for e in $ENVIRONMENTS; do
   CLIENT_IDS[$e]=$client_id
   ok "${id_name} clientId=${client_id}"
 
-  subject="repo:${GITHUB_OWNER}/${GITHUB_REPO}:environment:${e}"
-  fc_name="fc-github-${GITHUB_REPO}-${e}"
-  existing=$(az identity federated-credential list -g "$RG_CICD" --identity-name "$id_name" \
-               --query "[?subject=='${subject}'].name" -o tsv)
-  if [[ -z "$existing" ]]; then
-    az identity federated-credential create -g "$RG_CICD" --identity-name "$id_name" -n "$fc_name" \
-      --issuer "$OIDC_ISSUER" --subject "$subject" --audiences "$OIDC_AUDIENCE" -o none
-    ok "federated credential: ${subject}"
+  # GitHub repositories created after 2026-07-15 use the immutable subject
+  # format "repo:<owner>@<owner-id>/<repo>@<repo-id>:..."; older ones use names
+  # only. Trust both so the lab works for either kind of repository.
+  subjects=("repo:${GITHUB_OWNER}/${GITHUB_REPO}:environment:${e}")
+  if [[ -n "${GH_OWNER_ID:=$(gh api "repos/${GITHUB_OWNER}/${GITHUB_REPO}" --jq .owner.id 2>/dev/null || true)}" ]]; then
+    GH_REPO_ID=${GH_REPO_ID:-$(gh api "repos/${GITHUB_OWNER}/${GITHUB_REPO}" --jq .id)}
+    subjects+=("repo:${GITHUB_OWNER}@${GH_OWNER_ID}/${GITHUB_REPO}@${GH_REPO_ID}:environment:${e}")
   else
-    ok "federated credential exists: ${subject}"
+    warn "repository ${GITHUB_OWNER}/${GITHUB_REPO} not found yet: only the name-based subject is trusted; re-run this script after 02-setup-github.sh"
   fi
+  for k in "${!subjects[@]}"; do
+    subject=${subjects[$k]}
+    suffix=""; [[ $k -gt 0 ]] && suffix="-immutable"
+    fc_name="fc-github-${GITHUB_REPO}-${e}${suffix}"
+    existing=$(az identity federated-credential list -g "$RG_CICD" --identity-name "$id_name" \
+                 --query "[?subject=='${subject}'].name" -o tsv)
+    if [[ -z "$existing" ]]; then
+      az identity federated-credential create -g "$RG_CICD" --identity-name "$id_name" -n "$fc_name" \
+        --issuer "$OIDC_ISSUER" --subject "$subject" --audiences "$OIDC_AUDIENCE" -o none
+      ok "federated credential: ${subject}"
+    else
+      ok "federated credential exists: ${subject}"
+    fi
+  done
 
   if has_role "$principal_id" Contributor "$scope"; then
     ok "Contributor on ${rg_env} (exists)"
