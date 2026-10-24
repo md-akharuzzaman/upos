@@ -8,7 +8,9 @@ targetScope = 'resourceGroup'
 param environmentName string
 param location string = resourceGroup().location
 @description('Short region code used in names (CAF style), e.g. cc = Canada Central.')
-param locationShort string = 'cc'
+param locationShort string = 'ncus'
+@description('Region for Azure SQL (may differ from the app region when the offer restricts SQL).')
+param sqlLocation string = location
 @description('App Service plan SKU. Deployment slots need S1 or higher.')
 param appServiceSku string = 'B1'
 param enableStagingSlot bool = false
@@ -87,6 +89,7 @@ module data 'modules/data.bicep' = {
   name: 'data'
   params: {
     location: location
+    sqlLocation: sqlLocation
     tags: tags
     envShort: envShort
     locationShort: locationShort

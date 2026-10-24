@@ -48,17 +48,22 @@ done
 step "Region ${LOCATION}"
 az account list-locations --query "[?name=='${LOCATION}'].displayName" -o tsv | grep -q . || die "Unknown region ${LOCATION}"
 policy_regions=$(az policy assignment list --disable-scope-strict-match \
-  --query "[?contains(displayName || '', 'llowed') && contains(displayName || '', 'ocation')].parameters.listOfAllowedLocations.value" -o tsv 2>/dev/null | tr '\t\n' '  ')
+  --query "[?contains(to_string(parameters), 'listOfAllowedLocations')].parameters.listOfAllowedLocations.value | [0]" -o tsv 2>/dev/null | tr '\t\n' '  ' | xargs)
 if [[ -n "${policy_regions// /}" ]]; then
   [[ " $policy_regions " == *" ${LOCATION} "* ]] || die "${LOCATION} is not in your allowed-locations policy: ${policy_regions}"
-  ok "${LOCATION} allowed by policy (${policy_regions})"
+  [[ " $policy_regions " == *" ${SQL_LOCATION:-$LOCATION} "* ]] || die "SQL_LOCATION=${SQL_LOCATION} is not in your allowed-locations policy: ${policy_regions}"
+  ok "${LOCATION} (app) and ${SQL_LOCATION:-$LOCATION} (SQL) allowed by policy (${policy_regions})"
 else
   ok "No allowed-locations policy restricts ${LOCATION}"
 fi
 
 step "Service availability in ${LOCATION}"
-az sql db list-editions -l "$LOCATION" --edition Basic --available --query "[].name" -o tsv | grep -q Basic \
-  && ok "Azure SQL Basic available" || die "Azure SQL Basic is not available to this subscription in ${LOCATION}"
+az sql db list-editions -l "${SQL_LOCATION:-$LOCATION}" --edition Basic --available --query "[].name" -o tsv | grep -q Basic \
+  && ok "Azure SQL Basic available in ${SQL_LOCATION:-$LOCATION}" || die "Azure SQL Basic is not available to this subscription in ${SQL_LOCATION:-$LOCATION} (set SQL_LOCATION in config/eurc.env)"
+for e in dev test prod; do
+  grep -q "^param sqlLocation = '${SQL_LOCATION:-$LOCATION}'" "${ROOT_DIR}/infra/env/${e}.bicepparam" \
+    || die "infra/env/${e}.bicepparam must contain: param sqlLocation = '${SQL_LOCATION:-$LOCATION}'"
+done
 display=$(az account list-locations --query "[?name=='${LOCATION}'].displayName" -o tsv)
 has_sku() { az appservice list-locations --sku "$1" --linux-workers-enabled --query "[].name" -o tsv | grep -qi "^${display}$"; }
 if has_sku B1; then ok "App Service B1 (Linux) available"; else die "App Service B1 (Linux) not offered in ${LOCATION}"; fi

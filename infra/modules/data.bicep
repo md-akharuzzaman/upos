@@ -3,6 +3,8 @@
 // user-assigned managed identity. In prod they are private-endpoint only.
 
 param location string
+@description('Azure SQL region (private endpoint and app stay in the main region).')
+param sqlLocation string = location
 param tags object
 param sqlServerName string
 param sqlDatabaseName string
@@ -39,7 +41,7 @@ var roleStorageBlobDataContributor = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 // ---------------------------------------------------------------- Azure SQL
 resource sql 'Microsoft.Sql/servers@2025-01-01' = {
   name: sqlServerName
-  location: location
+  location: sqlLocation
   tags: tags
   properties: {
     minimalTlsVersion: '1.2'
@@ -68,7 +70,7 @@ resource sqlAllowAzure 'Microsoft.Sql/servers/firewallRules@2025-01-01' = if (!p
 resource db 'Microsoft.Sql/servers/databases@2025-01-01' = {
   parent: sql
   name: sqlDatabaseName
-  location: location
+  location: sqlLocation
   tags: tags
   sku: { name: sqlSkuName, tier: sqlSkuTier, capacity: sqlCapacity }
   properties: {

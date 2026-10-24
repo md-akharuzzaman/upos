@@ -8,3 +8,5 @@ param enableStagingSlot = false
 param enablePrivateNetworking = false
 param enableAlerts = false
 param storageSku = 'Standard_LRS'
+param locationShort = 'ncus'
+param sqlLocation = 'mexicocentral'
