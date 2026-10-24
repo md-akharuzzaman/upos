@@ -70,7 +70,7 @@ cd web && npm run dev     # React on http://localhost:5173 (proxies /api to :808
    in the `reports-test` artifact.
 4. **Tester:** open the test URL, try the register (it shows a **TEST** badge),
    then approve: **Review deployments → prod → Approve and deploy**.
-5. **prod** deploys to the staging slot, smoke-tests it, swaps, verifies and runs
+5. **prod** deploys to the staging slot, smoke-tests it, swaps with preview (production settings applied to staging, wait until Healthy, then switch), verifies and runs
    the post-deployment gate. **release tag** creates the GitHub release.
 
 Check it:
@@ -215,3 +215,18 @@ Type `eURC` to confirm, then check **Cost Management** the next day.
 | Playwright step fails with *Executable doesn't exist* | The runner image changed; the step installs Chromium with `npx playwright install --with-deps chromium` — re-run the job. Locally, run `npx playwright install chromium` in `tests/`. |
 | A collaborator cannot approve a PR | They have not accepted the invitation, or they are the PR author. Code owners must review their own area (see `TEAM.md`). |
 | Tester sees no *Review deployments* button | The tester was not a collaborator when step 02 ran. Re-run `./scripts/02-setup-github.sh`. |
+
+## Slot swap failed: "application initialization ... took too long"
+
+Production is unchanged when this happens. From v2.3.1 the pipeline swaps in
+two phases (`.github/scripts/swap-slots.sh`), so the warm-up wait is ours (15
+min) instead of App Service's. To finish or cancel a swap by hand:
+
+```bash
+RG=rg-eurc-prod-ncus; APP=app-eurc-web-prod-ncus-ats2j
+STG=https://$(az webapp show -g $RG -n $APP --slot staging --query defaultHostName -o tsv)
+az webapp deployment slot swap -g $RG -n $APP --slot staging --target-slot production --action preview
+until curl -fsS -m 10 $STG/health/ready; do sleep 15; done   # staging now runs with production settings
+az webapp deployment slot swap -g $RG -n $APP --slot staging --target-slot production --action swap
+# or, to cancel: --action reset
+```
