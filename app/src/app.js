@@ -8,17 +8,21 @@ const { MIGRATIONS } = require('./migrations');
 const { priceBasket, normaliseBasket, settlePayment } = require('./domain/pricing');
 const { withRefundTotals, planRefund, refundDeadline } = require('./domain/refunds');
 const { promotionInput, isRunning } = require('./domain/promotions');
+const { ROLES, can, permissionsOf, assignableRoles } = require('./domain/permissions');
+const { profileInput, publicProfile, bankInput, storeToday, STORE_TYPES, suggestedCategories } = require('./domain/business');
+const { normaliseBarcode } = require('./domain/barcode');
+const { changeInput } = require('./domain/reprice');
 const { hashPassword, verifyPassword, validatePassword, signToken, verifyToken } = require('./domain/auth');
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$/;
 const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,190}\.[a-z]{2,24}$/i;
 const SKU_RE = /^[A-Za-z0-9._-]{1,40}$/;
-const ROLES = new Set(['manager', 'cashier']);
 const SIGNING_SECRET = 'pos-token-signing-key';
-const MAX_IMPORT_ROWS = 500;
-// Products in these categories are sold as final sale by default (store policy;
-// the manager can still switch any product's "Refundable" setting).
+const MAX_IMPORT_ROWS = 1000; // per request; the browser and the CLI send big files in batches
+const MAX_LIST = 2000; // GET /api/products without paging (small stores, older clients)
+// Without a category record saying otherwise, these categories are final sale by default.
 const FINAL_SALE_CATEGORIES = new Set(['food']);
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 class HttpError extends Error {
   constructor(status, message) {
@@ -65,19 +69,42 @@ const int = (v, { min = 0, max = 10_000_000, name }) => {
   return v;
 };
 
-const publicUser = ({ id, email, name, role, active }) => ({ id, email, name, role, active });
-const publicProduct = ({ id, sku, name, category, priceCents, taxRateBp, stock, active, refundable }) => ({
+const publicUser = ({ id, email, name, role, active }) => ({ id, email, name, role, active, permissions: permissionsOf(role) });
+const publicProduct = ({ id, sku, name, category, subcategory, barcode, expiresOn, priceCents, taxRateBp, stock, active, refundable }) => ({
   id,
   sku,
   name,
   category,
+  subcategory: subcategory ?? null,
+  barcode: barcode ?? null,
+  expiresOn: expiresOn ?? null,
   priceCents,
   taxRateBp,
   stock,
   active,
   refundable: refundable !== false,
 });
-const publicStore = ({ id, slug, name, currency, refundWindowDays }) => ({ id, slug, name, currency, refundWindowDays: refundWindowDays ?? 30 });
+const publicStore = ({ id, slug, name, currency, refundWindowDays, profile }) => ({
+  id,
+  slug,
+  name,
+  currency,
+  refundWindowDays: refundWindowDays ?? 30,
+  profile: publicProfile(profile),
+});
+
+/** Business details a Canadian receipt should carry (legal name, address, GST/HST registration). */
+function receiptHeader(store) {
+  const p = store.profile || {};
+  const a = p.address || {};
+  const address = [a.line1, a.line2, [a.city, a.province, a.postalCode].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return {
+    legalName: p.legalName || null,
+    address: address || null,
+    phone: p.phone || null,
+    taxNumbers: [p.gstHstNumber && `GST/HST ${p.gstHstNumber}`, p.pstNumber && `PST ${p.pstNumber}`, p.qstNumber && `QST ${p.qstNumber}`].filter(Boolean),
+  };
+}
 
 /** The policy line printed on every receipt. */
 function policyText(store, lines) {
@@ -99,29 +126,46 @@ function dayWindow(date, tz) {
 function buildReceipt(store, rawSale) {
   const sale = withRefundTotals(rawSale);
   return {
-    store: { name: store.name, slug: store.slug, currency: store.currency },
+    store: { name: store.name, slug: store.slug, currency: store.currency, ...receiptHeader(store) },
     policy: policyText(store, sale.lines),
     refundBy: refundDeadline(sale, store.refundWindowDays ?? 30),
     receiptNo: sale.receiptNo,
     saleId: sale.id,
     createdAt: sale.createdAt,
     cashier: sale.cashierName,
-    lines: sale.lines.map(({ lineNo, sku, name, qty, unitPriceCents, taxRateBp, discountCents, promotionName, refundable, lineSubtotalCents, lineTaxCents, refundedQty, refundedSubtotalCents, refundedTaxCents }) => ({
-      lineNo,
-      discountCents: discountCents ?? 0,
-      promotionName: promotionName ?? null,
-      refundable: refundable !== false,
-      sku,
-      name,
-      qty,
-      unitPriceCents,
-      taxRateBp,
-      lineSubtotalCents,
-      lineTaxCents,
-      refundedQty,
-      refundedSubtotalCents,
-      refundedTaxCents,
-    })),
+    lines: sale.lines.map(
+      ({
+        lineNo,
+        sku,
+        name,
+        qty,
+        unitPriceCents,
+        taxRateBp,
+        discountCents,
+        promotionName,
+        refundable,
+        lineSubtotalCents,
+        lineTaxCents,
+        refundedQty,
+        refundedSubtotalCents,
+        refundedTaxCents,
+      }) => ({
+        lineNo,
+        discountCents: discountCents ?? 0,
+        promotionName: promotionName ?? null,
+        refundable: refundable !== false,
+        sku,
+        name,
+        qty,
+        unitPriceCents,
+        taxRateBp,
+        lineSubtotalCents,
+        lineTaxCents,
+        refundedQty,
+        refundedSubtotalCents,
+        refundedTaxCents,
+      }),
+    ),
     subtotalCents: sale.subtotalCents,
     discountCents: sale.discountCents ?? 0,
     taxCents: sale.taxCents,
@@ -205,6 +249,8 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', true);
+  // imports send up to 1000 rows per request; everything else stays small
+  app.use('/api/products/import', express.json({ limit: '2mb' }));
   app.use(express.json({ limit: '128kb' }));
 
   app.use((req, res, next) => {
@@ -252,6 +298,14 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   // ---- health ------------------------------------------------------------
   app.get('/health/live', (req, res) => res.json({ status: 'Alive' }));
 
+  // Readiness: started and the database schema is current. Used by the slot
+  // swap warm-up, so a slow first connection to a dependency cannot cancel a
+  // release; /health (below) still checks every dependency for monitoring.
+  app.get('/health/ready', (req, res) => {
+    const ok = state.ready && state.schemaVersion >= MIGRATIONS.at(-1).version;
+    res.status(ok ? 200 : 503).json({ status: ok ? 'Ready' : 'Starting', version: config.build.version, schemaVersion: state.schemaVersion });
+  });
+
   app.get('/health', async (req, res) => {
     const base = { ...info(), schemaVersion: state.schemaVersion, expectedSchemaVersion: MIGRATIONS.at(-1).version };
     if (!state.ready) {
@@ -296,8 +350,12 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   }
   // Every :id in a URL is a GUID. Anything else cannot exist: answer 404 here
   // instead of letting the database driver reject it as a 500.
-  app.param('id', (req, res, next, id) => (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? next() : res.status(404).json({ error: 'not found' })));
-  const managerOnly = (req, res, next) => (req.user.role === 'manager' ? next() : res.status(403).json({ error: 'manager role required' }));
+  app.param('id', (req, res, next, id) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? next() : res.status(404).json({ error: 'not found' }),
+  );
+  /** Route guard: the signed-in user's role must have this permission (domain/permissions.js). */
+  const need = (permission) => (req, res, next) =>
+    can(req.user.role, permission) ? next() : res.status(403).json({ error: `your role (${req.user.role}) cannot do this (${permission})` });
 
   app.post('/api/stores', rateLimiter({ limit: 10, windowMs: 60000 }), async (req, res) => {
     const b = req.body || {};
@@ -305,12 +363,15 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     if (!SLUG_RE.test(slug)) throw bad('store code must be 3-40 characters: lowercase letters, digits, hyphens');
     const storeName = str(b.storeName, { min: 2, name: 'store name' });
     const managerName = str(b.managerName, { min: 2, name: 'manager name' });
-    const email = String(b.email || '').trim().toLowerCase();
+    const email = String(b.email || '')
+      .trim()
+      .toLowerCase();
     if (!EMAIL_RE.test(email)) throw bad('a valid e-mail is required');
     const pwErr = validatePassword(b.password);
     if (pwErr) throw bad(pwErr);
     const store = { id: crypto.randomUUID(), slug, name: storeName };
-    const manager = { id: crypto.randomUUID(), email, name: managerName, role: 'manager', passwordHash: hashPassword(b.password) };
+    // the person who opens the store is its first Admin
+    const manager = { id: crypto.randomUUID(), email, name: managerName, role: 'admin', passwordHash: hashPassword(b.password) };
     try {
       const saved = await db.createStore({ store, manager });
       res.status(201).json(await issue(saved, manager));
@@ -320,26 +381,20 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     }
   });
 
-  app.post(
-    '/api/auth/login',
-    rateLimiter({ limit: 10, windowMs: 60000, key: (req) => `${req.ip}|${String(req.body?.store || '')}` }),
-    async (req, res) => {
-      const { store: slug, email, password } = req.body || {};
-      const fail = () => res.status(401).json({ error: 'store code, e-mail or password is incorrect' });
-      if (typeof slug !== 'string' || typeof email !== 'string' || typeof password !== 'string') return fail();
-      const store = await db.getStoreBySlug(slug.toLowerCase());
-      const user = store && (await db.findUserByEmail(store.id, email.trim().toLowerCase()));
-      if (!user || !user.active || !verifyPassword(password, user.passwordHash)) return fail();
-      return res.json(await issue(store, user));
-    },
-  );
+  app.post('/api/auth/login', rateLimiter({ limit: 10, windowMs: 60000, key: (req) => `${req.ip}|${String(req.body?.store || '')}` }), async (req, res) => {
+    const { store: slug, email, password } = req.body || {};
+    const fail = () => res.status(401).json({ error: 'store code, e-mail or password is incorrect' });
+    if (typeof slug !== 'string' || typeof email !== 'string' || typeof password !== 'string') return fail();
+    const store = await db.getStoreBySlug(slug.toLowerCase());
+    const user = store && (await db.findUserByEmail(store.id, email.trim().toLowerCase()));
+    if (!user || !user.active || !verifyPassword(password, user.passwordHash)) return fail();
+    return res.json(await issue(store, user));
+  });
 
-  app.get('/api/me', auth, (req, res) =>
-    res.json({ user: publicUser(req.user), store: publicStore(req.store) }),
-  );
+  app.get('/api/me', auth, (req, res) => res.json({ user: publicUser(req.user), store: publicStore(req.store) }));
 
   // ---- store settings (refund policy) ----------------------------------------
-  app.patch('/api/store/settings', auth, managerOnly, async (req, res) => {
+  app.patch('/api/store/settings', auth, need('store.settings'), async (req, res) => {
     const b = req.body || {};
     if (b.refundWindowDays === undefined) throw bad('nothing to update');
     const days = int(b.refundWindowDays, { min: 0, max: 365, name: 'refundWindowDays' });
@@ -347,17 +402,20 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   });
 
   // ---- users -------------------------------------------------------------
-  app.get('/api/users', auth, managerOnly, async (req, res) => {
+  app.get('/api/users', auth, need('staff.manage'), async (req, res) => {
     res.json((await db.listUsers(req.store.id)).map(publicUser));
   });
 
-  app.post('/api/users', auth, managerOnly, async (req, res) => {
+  app.post('/api/users', auth, need('staff.manage'), async (req, res) => {
     const b = req.body || {};
     const name = str(b.name, { min: 2, name: 'name' });
-    const email = String(b.email || '').trim().toLowerCase();
+    const email = String(b.email || '')
+      .trim()
+      .toLowerCase();
     if (!EMAIL_RE.test(email)) throw bad('a valid e-mail is required');
     const role = b.role || 'cashier';
-    if (!ROLES.has(role)) throw bad('role must be manager or cashier');
+    if (!ROLES.includes(role)) throw bad(`role must be one of: ${ROLES.join(', ')}`);
+    if (!assignableRoles(req.user.role).includes(role)) throw new HttpError(403, `a ${req.user.role} cannot add a ${role}`);
     const pwErr = validatePassword(b.password);
     if (pwErr) throw bad(pwErr);
     try {
@@ -369,22 +427,177 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     }
   });
 
-  app.patch('/api/users/:id', auth, managerOnly, async (req, res) => {
-    if (typeof req.body?.active !== 'boolean') throw bad('active (true/false) is required');
-    if (req.params.id === req.user.id) throw bad('you cannot deactivate yourself');
-    const u = await db.setUserActive(req.store.id, req.params.id, req.body.active);
-    if (!u) throw new HttpError(404, 'user not found');
+  // Change a staff member's role and/or deactivate them. Managers cannot touch
+  // admins; nobody can lock themselves out; the store always keeps an admin.
+  app.patch('/api/users/:id', auth, need('staff.manage'), async (req, res) => {
+    const b = req.body || {};
+    const patch = {};
+    if (b.active !== undefined) {
+      if (typeof b.active !== 'boolean') throw bad('active must be true or false');
+      patch.active = b.active;
+    }
+    if (b.role !== undefined) {
+      if (!ROLES.includes(b.role)) throw bad(`role must be one of: ${ROLES.join(', ')}`);
+      patch.role = b.role;
+    }
+    if (Object.keys(patch).length === 0) throw bad('give active and/or role');
+    if (req.params.id === req.user.id) throw bad('you cannot change your own role or deactivate yourself');
+    const staff = await db.listUsers(req.store.id);
+    const target = staff.find((u) => u.id === req.params.id);
+    if (!target) throw new HttpError(404, 'user not found');
+    const allowed = assignableRoles(req.user.role);
+    if (!allowed.includes(target.role) || (patch.role && !allowed.includes(patch.role))) {
+      throw new HttpError(403, `a ${req.user.role} cannot change a ${target.role}${patch.role ? ` into a ${patch.role}` : ''}`);
+    }
+    const losesAdmin = target.role === 'admin' && target.active && (patch.active === false || (patch.role && patch.role !== 'admin'));
+    if (losesAdmin && staff.filter((u) => u.role === 'admin' && u.active).length === 1) throw bad('the store must keep at least one active admin');
+    const u = await db.updateUser(req.store.id, req.params.id, patch);
     res.json(publicUser(u));
   });
 
-  // ---- products ----------------------------------------------------------
-  app.get('/api/products', auth, async (req, res) => {
-    const includeInactive = req.query.all === '1' && req.user.role === 'manager';
-    const q = typeof req.query.q === 'string' ? req.query.q.slice(0, 60) : '';
-    res.json((await db.listProducts(req.store.id, { q, includeInactive })).map(publicProduct));
+  // ---- business profile (Admin) ---------------------------------------------
+  app.get('/api/store/profile', auth, async (req, res) => {
+    res.json({ ...publicStore(req.store), storeTypes: STORE_TYPES });
   });
 
-  function productInput(b, partial) {
+  app.put('/api/store/profile', auth, need('business.profile'), async (req, res) => {
+    const b = req.body || {};
+    const profile = profileInput(b, req.store.profile || {});
+    if (b.bank !== undefined) {
+      if (b.bank === null) {
+        await secrets.remove?.(`bank-${req.store.id}`);
+        profile.bank = null;
+      } else {
+        const bank = bankInput(b.bank);
+        // the full numbers live only in Key Vault; the database keeps a masked copy
+        await secrets.set(`bank-${req.store.id}`, JSON.stringify(bank.secret));
+        profile.bank = bank.masked;
+      }
+    }
+    const patch = { profile };
+    if (b.storeName !== undefined) patch.name = str(b.storeName, { min: 2, name: 'store name' });
+    const saved = await db.updateStoreSettings(req.store.id, patch);
+    res.json({ ...publicStore(saved), storeTypes: STORE_TYPES });
+  });
+
+  // ---- categories and sub-categories -------------------------------------
+  app.get('/api/categories', auth, async (req, res) => {
+    res.json(await db.listCategories(req.store.id));
+  });
+
+  app.post('/api/categories', auth, need('categories.manage'), async (req, res) => {
+    const b = req.body || {};
+    const name = str(b.name, { min: 1, max: 60, name: 'name' });
+    let parentId = null;
+    if (b.parentId) {
+      const parent = (await db.listCategories(req.store.id)).find((c) => c.id === b.parentId);
+      if (!parent) throw bad('parent category not found');
+      if (parent.parentId) throw bad('sub-categories cannot have sub-categories (two levels)');
+      parentId = parent.id;
+    }
+    if (b.finalSale !== undefined && typeof b.finalSale !== 'boolean') throw bad('finalSale must be true or false');
+    try {
+      res.status(201).json(await db.createCategory(req.store.id, { id: crypto.randomUUID(), name, parentId, finalSale: b.finalSale === true }));
+    } catch (err) {
+      if (err.code === 'DUPLICATE') throw new HttpError(409, `category "${name}" already exists here`);
+      throw err;
+    }
+  });
+
+  app.patch('/api/categories/:id', auth, need('categories.manage'), async (req, res) => {
+    const b = req.body || {};
+    const patch = {};
+    if (b.name !== undefined) patch.name = str(b.name, { min: 1, max: 60, name: 'name' });
+    if (b.finalSale !== undefined) {
+      if (typeof b.finalSale !== 'boolean') throw bad('finalSale must be true or false');
+      patch.finalSale = b.finalSale;
+    }
+    if (Object.keys(patch).length === 0) throw bad('nothing to update');
+    try {
+      const c = await db.updateCategory(req.store.id, req.params.id, patch);
+      if (!c) throw new HttpError(404, 'category not found');
+      res.json(c);
+    } catch (err) {
+      if (err.code === 'DUPLICATE') throw new HttpError(409, 'a category with that name already exists here');
+      throw err;
+    }
+  });
+
+  // Store type -> a starter set of categories (skips any that already exist).
+  app.post('/api/categories/suggested', auth, need('categories.manage'), async (req, res) => {
+    const type = req.body?.storeType || req.store.profile?.storeType;
+    const tree = suggestedCategories(type);
+    if (!tree) throw bad(`storeType must be one of: ${STORE_TYPES.map((t) => t.id).join(', ')}`);
+    const existing = await db.listCategories(req.store.id);
+    const key = (name, parentId) => `${parentId || ''}|${name.toLowerCase()}`;
+    const have = new Map(existing.map((c) => [key(c.name, c.parentId), c]));
+    let created = 0;
+    for (const top of tree) {
+      let parent = have.get(key(top.name, null));
+      if (!parent) {
+        parent = await db.createCategory(req.store.id, { id: crypto.randomUUID(), name: top.name, parentId: null, finalSale: Boolean(top.finalSale) });
+        created += 1;
+      }
+      for (const sub of top.subcategories || []) {
+        if (have.has(key(sub, parent.id))) continue;
+        await db.createCategory(req.store.id, { id: crypto.randomUUID(), name: sub, parentId: parent.id, finalSale: Boolean(top.finalSale) });
+        created += 1;
+      }
+    }
+    res.json({ created, categories: await db.listCategories(req.store.id) });
+  });
+
+  // ---- products ----------------------------------------------------------
+  function searchOptions(req) {
+    const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 60) : '';
+    const o = { q, includeInactive: req.query.all === '1' && can(req.user.role, 'products.manage') };
+    if (typeof req.query.category === 'string' && req.query.category) o.category = req.query.category.slice(0, 60);
+    if (typeof req.query.subcategory === 'string' && req.query.subcategory) o.subcategory = req.query.subcategory.slice(0, 60);
+    if (req.query.expiring !== undefined) {
+      // expiring=N: expires within N days (store time zone); expiring=0: already expired
+      const days = Number(req.query.expiring);
+      if (!Number.isInteger(days) || days < 0 || days > 365) throw bad('expiring must be 0-365 days');
+      const d = new Date(`${storeToday(req.store)}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + days);
+      o.expiresBefore = d.toISOString().slice(0, 10);
+    }
+    return o;
+  }
+
+  // Without ?limit: a plain array (up to 2000) as in earlier versions.
+  // With ?limit=&offset=: { items, total, limit, offset } - for big catalogues.
+  app.get('/api/products', auth, async (req, res) => {
+    const o = searchOptions(req);
+    if (req.query.limit === undefined) {
+      const r = await db.searchProducts(req.store.id, { ...o, limit: MAX_LIST, offset: 0 });
+      return res.json(r.items.map(publicProduct));
+    }
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 200);
+    const offset = Math.max(Number.parseInt(req.query.offset, 10) || 0, 0);
+    const r = await db.searchProducts(req.store.id, { ...o, limit, offset });
+    return res.json({ items: r.items.map(publicProduct), total: r.total, limit, offset });
+  });
+
+  // Barcode scanner / SKU entry at the till: one exact match.
+  app.get('/api/products/lookup', auth, async (req, res) => {
+    const code = String(req.query.code || '')
+      .trim()
+      .toUpperCase();
+    if (!code || code.length > 40) throw bad('code is required');
+    const p = await db.findProductByCode(req.store.id, code);
+    if (!p || (!p.active && !can(req.user.role, 'products.manage'))) throw new HttpError(404, `no product with barcode or SKU ${code}`);
+    res.json(publicProduct(p));
+  });
+
+  /** Names of categories / sub-categories the store marked as final sale. */
+  async function finalSaleNames(storeId) {
+    const cats = await db.listCategories(storeId);
+    const set = new Set(cats.filter((c) => c.finalSale).map((c) => c.name.toLowerCase()));
+    const known = new Set(cats.map((c) => c.name.toLowerCase()));
+    return { set, known };
+  }
+
+  function productInput(b, partial, finalSale = { set: new Set(), known: new Set() }) {
     const out = {};
     if (!partial || b.sku !== undefined) {
       if (typeof b.sku !== 'string' || !SKU_RE.test(b.sku.trim())) throw bad('sku must be 1-40 letters, digits, . _ -');
@@ -392,6 +605,15 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     }
     if (!partial || b.name !== undefined) out.name = str(b.name, { min: 1, name: 'name' });
     if (b.category !== undefined) out.category = str(b.category, { min: 1, max: 60, name: 'category' });
+    if (b.subcategory !== undefined)
+      out.subcategory = b.subcategory === null || b.subcategory === '' ? null : str(b.subcategory, { min: 1, max: 60, name: 'subcategory' });
+    if (b.barcode !== undefined) out.barcode = normaliseBarcode(b.barcode);
+    if (b.expiresOn !== undefined) {
+      if (b.expiresOn === null || b.expiresOn === '') out.expiresOn = null;
+      else if (typeof b.expiresOn !== 'string' || !DATE_RE.test(b.expiresOn) || Number.isNaN(Date.parse(`${b.expiresOn}T00:00:00Z`)))
+        throw bad('expiresOn must be a date YYYY-MM-DD');
+      else out.expiresOn = b.expiresOn;
+    }
     if (!partial || b.priceCents !== undefined) out.priceCents = int(b.priceCents, { max: 10_000_000, name: 'priceCents' });
     if (b.taxRateBp !== undefined) out.taxRateBp = int(b.taxRateBp, { max: 5000, name: 'taxRateBp' });
     if (b.stock !== undefined) out.stock = int(b.stock, { max: 1_000_000, name: 'stock' });
@@ -399,7 +621,10 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
       if (typeof b.refundable !== 'boolean') throw bad('refundable must be true or false');
       out.refundable = b.refundable;
     } else if (!partial) {
-      out.refundable = !FINAL_SALE_CATEGORIES.has(String(out.category || 'General').toLowerCase());
+      const names = [out.category || 'General', out.subcategory].filter(Boolean).map((n) => n.toLowerCase());
+      const flagged = names.some((n) => finalSale.set.has(n));
+      const fallback = !names.some((n) => finalSale.known.has(n)) && names.some((n) => FINAL_SALE_CATEGORIES.has(n));
+      out.refundable = !(flagged || fallback);
     }
     if (partial && b.active !== undefined) {
       if (typeof b.active !== 'boolean') throw bad('active must be true or false');
@@ -407,18 +632,19 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     }
     return out;
   }
+  const dupMessage = (err) => (err.field === 'barcode' ? 'that barcode is already used by another product' : 'that SKU already exists');
 
-  app.post('/api/products', auth, managerOnly, async (req, res) => {
+  app.post('/api/products', auth, need('products.manage'), async (req, res) => {
     try {
-      const p = await db.createProduct(req.store.id, { id: crypto.randomUUID(), ...productInput(req.body || {}, false) });
+      const p = await db.createProduct(req.store.id, { id: crypto.randomUUID(), ...productInput(req.body || {}, false, await finalSaleNames(req.store.id)) });
       res.status(201).json(publicProduct(p));
     } catch (err) {
-      if (err.code === 'DUPLICATE') throw new HttpError(409, 'that SKU already exists');
+      if (err.code === 'DUPLICATE') throw new HttpError(409, dupMessage(err));
       throw err;
     }
   });
 
-  app.patch('/api/products/:id', auth, managerOnly, async (req, res) => {
+  app.patch('/api/products/:id', auth, need('products.manage'), async (req, res) => {
     const patch = productInput(req.body || {}, true);
     if (Object.keys(patch).length === 0) throw bad('nothing to update');
     try {
@@ -426,7 +652,7 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
       if (!p) throw new HttpError(404, 'product not found');
       res.json(publicProduct(p));
     } catch (err) {
-      if (err.code === 'DUPLICATE') throw new HttpError(409, 'that SKU already exists');
+      if (err.code === 'DUPLICATE') throw new HttpError(409, dupMessage(err));
       throw err;
     }
   });
@@ -434,28 +660,46 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   // Excel / CSV import: rows already parsed by the browser. All rows are
   // validated first; nothing is saved unless every row is valid. Existing SKUs
   // are updated (only the columns given), new SKUs are added.
-  app.post('/api/products/import', auth, managerOnly, async (req, res) => {
+  app.post('/api/products/import', auth, need('products.manage'), async (req, res) => {
     const rows = req.body?.rows;
     if (!Array.isArray(rows) || rows.length === 0) throw bad('rows must be a non-empty array');
-    if (rows.length > MAX_IMPORT_ROWS) throw bad(`at most ${MAX_IMPORT_ROWS} rows per import`);
-    const existing = new Map((await db.listProducts(req.store.id, { includeInactive: true })).map((p) => [p.sku, p]));
+    if (rows.length > MAX_IMPORT_ROWS) throw bad(`at most ${MAX_IMPORT_ROWS} rows per request (send big files in batches)`);
+    // batches of a big file say where they start, so errors name the spreadsheet row
+    const firstRow = Number.isInteger(req.body.startRow) && req.body.startRow >= 2 ? req.body.startRow : 2;
+    const upper = (v) => (typeof v === 'string' ? v.trim().toUpperCase() : v);
+    const skus = rows.map((r) => upper(r?.sku)).filter((v) => typeof v === 'string');
+    const codes = rows.map((r) => (r?.barcode ? String(r.barcode).replace(/\s+/g, '').toUpperCase() : null)).filter(Boolean);
+    const found0 = await db.findProductsByCodes(req.store.id, { skus, barcodes: codes });
+    const existing = new Map(found0.map((p) => [p.sku, p]));
+    const barcodeOwner = new Map(found0.filter((p) => p.barcode).map((p) => [p.barcode, p.sku]));
+    const finalSale = await finalSaleNames(req.store.id);
     const seen = new Set();
+    const seenCodes = new Map();
     const errors = [];
     const plan = [];
     rows.forEach((raw, i) => {
-      const row = i + 2; // spreadsheet row number (row 1 = headings)
+      const row = firstRow + i; // spreadsheet row number (row 1 = headings)
       try {
-        const sku = typeof raw?.sku === 'string' ? raw.sku.trim().toUpperCase() : raw?.sku;
+        const sku = upper(raw?.sku);
         if (seen.has(sku)) throw bad(`SKU ${sku} appears twice in the file`);
         seen.add(sku);
         const found = existing.get(sku);
+        const checkBarcode = (code) => {
+          if (!code) return;
+          if (seenCodes.has(code)) throw bad(`barcode ${code} is also on row ${seenCodes.get(code)}`);
+          seenCodes.set(code, row);
+          const owner = barcodeOwner.get(code);
+          if (owner && owner !== sku) throw bad(`barcode ${code} already belongs to ${owner}`);
+        };
         if (found) {
           const patch = productInput({ ...raw, sku }, true);
+          checkBarcode(patch.barcode);
           delete patch.sku;
           const changed = Object.keys(patch).filter((k) => patch[k] !== found[k]);
           plan.push({ row, action: changed.length ? 'update' : 'unchanged', sku, name: patch.name ?? found.name, changed, item: { id: found.id, ...patch } });
         } else {
-          const p = productInput({ ...raw, sku }, false);
+          const p = productInput({ ...raw, sku }, false, finalSale);
+          checkBarcode(p.barcode);
           if (raw.active !== undefined) {
             if (typeof raw.active !== 'boolean') throw bad('active must be true or false');
             p.active = raw.active;
@@ -479,7 +723,7 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     try {
       if (items.length) await db.saveProducts(req.store.id, items);
     } catch (err) {
-      if (err.code === 'DUPLICATE') throw new HttpError(409, 'a SKU in the file clashes with another product');
+      if (err.code === 'DUPLICATE') throw new HttpError(409, `a ${err.field === 'barcode' ? 'barcode' : 'SKU'} in the file clashes with another product`);
       throw err;
     }
     res.json({ dryRun: false, ...summary });
@@ -488,49 +732,22 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   // Batch price / tax change for selected products, one category, or all.
   // price: { mode: 'set' | 'percent' | 'amount', value } - percent in basis
   // points (+500 = +5 %), amount in cents (may be negative). Preview with dryRun.
-  app.post('/api/products/bulk-update', auth, managerOnly, async (req, res) => {
+  app.post('/api/products/bulk-update', auth, need('products.manage'), async (req, res) => {
     const b = req.body || {};
-    const all = await db.listProducts(req.store.id, { includeInactive: true });
-    let targets;
+    let where;
     if (Array.isArray(b.productIds)) {
       if (b.productIds.length === 0 || b.productIds.length > MAX_IMPORT_ROWS) throw bad(`productIds must list 1-${MAX_IMPORT_ROWS} products`);
-      const ids = new Set(b.productIds);
-      targets = all.filter((p) => ids.has(p.id));
-      if (targets.length !== ids.size) throw new HttpError(404, 'some products were not found in this store');
-    } else if (typeof b.category === 'string' && b.category.trim()) {
-      targets = all.filter((p) => p.category.toLowerCase() === b.category.trim().toLowerCase());
-    } else if (b.all === true) targets = all;
+      where = { ids: [...new Set(b.productIds)] };
+    } else if (typeof b.category === 'string' && b.category.trim()) where = { category: str(b.category, { max: 60, name: 'category' }) };
+    else if (b.all === true) where = { all: true };
     else throw bad('choose productIds, a category, or all: true');
-    if (targets.length === 0) throw bad('no products match');
-    if (b.price === undefined && b.taxRateBp === undefined) throw bad('give a price change and/or taxRateBp');
-    const tax = b.taxRateBp === undefined ? undefined : int(b.taxRateBp, { max: 5000, name: 'taxRateBp' });
-    let price = null;
-    if (b.price !== undefined) {
-      const { mode, value } = b.price || {};
-      if (!['set', 'percent', 'amount'].includes(mode)) throw bad("price.mode must be 'set', 'percent' or 'amount'");
-      if (!Number.isInteger(value)) throw bad('price.value must be a whole number (cents, or basis points for percent)');
-      if (mode === 'set') int(value, { max: 10_000_000, name: 'price.value' });
-      if (mode === 'percent' && (value < -10000 || value > 100000)) throw bad('price.value must be -10000..100000 basis points');
-      price = (cents) => {
-        if (mode === 'set') return value;
-        if (mode === 'amount') return cents + value;
-        const raw = (cents * (10000 + value)) / 10000;
-        return Math.sign(raw) * Math.round(Math.abs(raw));
-      };
-    }
-    const changes = targets.map((p) => {
-      const after = { priceCents: price ? price(p.priceCents) : p.priceCents, taxRateBp: tax ?? p.taxRateBp };
-      return { id: p.id, sku: p.sku, name: p.name, before: { priceCents: p.priceCents, taxRateBp: p.taxRateBp }, after };
-    });
-    const negative = changes.find((c) => c.after.priceCents < 0 || c.after.priceCents > 10_000_000);
-    if (negative) throw bad(`${negative.sku} would end up at an invalid price (${negative.after.priceCents} cents)`);
-    if (!b.dryRun) {
-      const items = changes
-        .filter((c) => c.after.priceCents !== c.before.priceCents || c.after.taxRateBp !== c.before.taxRateBp)
-        .map((c) => ({ id: c.id, priceCents: c.after.priceCents, taxRateBp: c.after.taxRateBp }));
-      if (items.length) await db.saveProducts(req.store.id, items);
-    }
-    res.json({ dryRun: Boolean(b.dryRun), count: changes.length, changes });
+    const change = changeInput(b);
+    // one statement / one transaction, however many products match
+    const r = await db.repriceProducts(req.store.id, where, change, { dryRun: Boolean(b.dryRun), previewLimit: 50 });
+    if (where.ids && r.count !== where.ids.length) throw new HttpError(404, 'some products were not found in this store');
+    if (r.count === 0) throw bad('no products match');
+    if (r.invalid) throw bad(`${r.invalid.sku} would end up at an invalid price (${r.invalid.priceCents} cents)`);
+    res.json({ dryRun: Boolean(b.dryRun), count: r.count, changes: r.preview, more: Math.max(0, r.count - r.preview.length) });
   });
 
   // ---- promotions ---------------------------------------------------------
@@ -540,15 +757,15 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     const state = (p) => (isRunning(p, now) ? 'running' : p.active && new Date(p.startsAt) > now ? 'scheduled' : 'ended');
     const out = list.map((p) => ({ ...p, running: isRunning(p, now), state: state(p) }));
     // cashiers only need what is running now (for the register preview)
-    res.json(req.user.role === 'manager' && req.query.running !== '1' ? out : out.filter((p) => p.running));
+    res.json(can(req.user.role, 'promotions.manage') && req.query.running !== '1' ? out : out.filter((p) => p.running));
   });
 
-  app.post('/api/promotions', auth, managerOnly, async (req, res) => {
+  app.post('/api/promotions', auth, need('promotions.manage'), async (req, res) => {
     const p = promotionInput(req.body || {});
     res.status(201).json(await db.createPromotion(req.store.id, { id: crypto.randomUUID(), ...p }));
   });
 
-  app.patch('/api/promotions/:id', auth, managerOnly, async (req, res) => {
+  app.patch('/api/promotions/:id', auth, need('promotions.manage'), async (req, res) => {
     const patch = promotionInput(req.body || {}, { partial: true });
     for (const k of ['kind', 'value', 'target', 'category', 'skus']) {
       if (patch[k] !== undefined) throw bad('kind, value and target cannot change: end this promotion and create a new one');
@@ -560,15 +777,21 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   });
 
   // ---- sales -------------------------------------------------------------
-  app.post('/api/sales', auth, async (req, res) => {
+  app.post('/api/sales', auth, need('sales.create'), async (req, res) => {
     const basket = normaliseBasket(req.body?.items);
-    const found = await db.getProductsByIds(req.store.id, basket.map((i) => i.productId));
+    const found = await db.getProductsByIds(
+      req.store.id,
+      basket.map((i) => i.productId),
+    );
     const byId = new Map(found.map((p) => [p.id, p]));
     const items = basket.map(({ productId, qty }) => {
       const product = byId.get(productId);
       if (!product || !product.active) throw bad(`product ${productId} is not for sale in this store`);
       return { product, qty };
     });
+    const today = storeToday(req.store);
+    const expired = items.find(({ product }) => product.expiresOn && product.expiresOn < today);
+    if (expired) throw new HttpError(409, `${expired.product.name} expired on ${expired.product.expiresOn} and cannot be sold`);
     const now = new Date();
     const running = (await db.listPromotions(req.store.id)).filter((p) => isRunning(p, now));
     const priced = priceBasket(items, running, now);
@@ -622,7 +845,18 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     // original as printed (receipts written by v2.0 have no line numbers).
     const live = buildReceipt(req.store, s);
     const receipt = stored
-      ? { ...stored, lines: live.lines, status: live.status, refundedAt: live.refundedAt, refundState: live.refundState, refundedCents: live.refundedCents, refunds: live.refunds, policy: stored.policy ?? live.policy, refundBy: live.refundBy, discountCents: live.discountCents }
+      ? {
+          ...stored,
+          lines: live.lines,
+          status: live.status,
+          refundedAt: live.refundedAt,
+          refundState: live.refundState,
+          refundedCents: live.refundedCents,
+          refunds: live.refunds,
+          policy: stored.policy ?? live.policy,
+          refundBy: live.refundBy,
+          discountCents: live.discountCents,
+        }
       : live;
     res.json({ ...receipt, source: stored ? 'blob' : 'rebuilt' });
   });
@@ -632,6 +866,7 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     const reason = b.reason === undefined || b.reason === '' ? null : str(b.reason, { min: 1, max: 200, name: 'reason' });
     if (b.override !== undefined && typeof b.override !== 'boolean') throw bad('override must be true or false');
     const override = b.override === true;
+    if (override && !can(req.user.role, 'refunds.override')) throw new HttpError(403, `your role (${req.user.role}) cannot override the refund policy`);
     if (override && (!reason || reason.length < 5)) throw bad('a policy override needs a reason (at least 5 characters)');
     const meta = { id: crypto.randomUUID(), cashierId: req.user.id, cashierName: req.user.name, reason, policyOverride: override };
     const policy = { windowDays: req.store.refundWindowDays ?? 30, now: new Date(), override };
@@ -647,7 +882,12 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
     const r = sale.refunds.find((x) => x.id === out.refund.id);
     const receipt = buildReceipt(req.store, out.sale);
     try {
-      await blobs.putJson(sale.receiptBlob.replace(/\.json$/, `-R${r.seq}.json`), { store: receipt.store, receiptNo: sale.receiptNo, saleId: sale.id, ...publicRefund(r) });
+      await blobs.putJson(sale.receiptBlob.replace(/\.json$/, `-R${r.seq}.json`), {
+        store: receipt.store,
+        receiptNo: sale.receiptNo,
+        saleId: sale.id,
+        ...publicRefund(r),
+      });
       await blobs.putJson(sale.receiptBlob, receipt);
     } catch (err) {
       // The refund is committed; its receipt can always be rebuilt from SQL.
@@ -657,18 +897,18 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   }
 
   // Refund chosen lines: { items: [{ lineNo, qty }], reason? }
-  app.post('/api/sales/:id/refunds', auth, managerOnly, async (req, res) => {
+  app.post('/api/sales/:id/refunds', auth, need('refunds.create'), async (req, res) => {
     if (req.body?.items === undefined) throw bad('items is required: [{ lineNo, qty }]');
     res.status(201).json(await refund(req, req.body.items));
   });
 
   // Refund everything not yet refunded (the v2.0 API, kept for compatibility).
-  app.post('/api/sales/:id/refund', auth, managerOnly, async (req, res) => {
+  app.post('/api/sales/:id/refund', auth, need('refunds.create'), async (req, res) => {
     res.json((await refund(req, undefined)).sale);
   });
 
   // ---- reports -----------------------------------------------------------
-  app.get('/api/reports/daily', auth, managerOnly, async (req, res) => {
+  app.get('/api/reports/daily', auth, need('reports.view'), async (req, res) => {
     const date = req.query.date || new Date().toISOString().slice(0, 10);
     const w = dayWindow(date, req.query.tz);
     const sales = await db.listSales(req.store.id, { ...w, limit: 500 });
@@ -676,9 +916,10 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   });
 
   // ---- store lifecycle (used by the test suites to clean up) -------------
-  app.delete('/api/stores/current', auth, managerOnly, async (req, res) => {
+  app.delete('/api/stores/current', auth, need('store.delete'), async (req, res) => {
     if (req.body?.confirm !== req.store.slug) throw bad('confirm must equal the store code');
     await blobs.deletePrefix(`receipts/${req.store.id}/`);
+    if (req.store.profile?.bank) await secrets.remove?.(`bank-${req.store.id}`);
     await db.deleteStore(req.store.id);
     res.status(204).end();
   });

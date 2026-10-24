@@ -188,6 +188,55 @@ CREATE TABLE dbo.promotions (
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_promotions_store')
 CREATE INDEX ix_promotions_store ON dbo.promotions(store_id, active);`,
   },
+  {
+    // v2.3 foundations. Expand only, except the role CHECK, which is widened
+    // (it still accepts every value older versions write). The first manager
+    // of each store becomes its Admin. Caveat after a rollback to v2.2: an
+    // Admin is not a "manager" there, so Admins could only sell until v2.3 is
+    // back - roll forward, or set the role back to manager in SQL.
+    // Statements that use columns added in this same batch run through EXEC,
+    // because SQL Server compiles the whole batch before adding them.
+    version: 6,
+    name: 'roles_profile_categories_barcodes_expiry',
+    sql: `
+IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'ck_users_role' AND definition NOT LIKE N'%procurement%')
+  ALTER TABLE dbo.users DROP CONSTRAINT ck_users_role;
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'ck_users_role')
+  ALTER TABLE dbo.users ADD CONSTRAINT ck_users_role CHECK (role IN (N'admin', N'manager', N'cashier', N'sales', N'procurement', N'support'));
+EXEC(N'
+WITH firsts AS (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY store_id ORDER BY created_at, id) AS rn
+  FROM dbo.users
+  WHERE role = N''manager'' AND store_id NOT IN (SELECT store_id FROM dbo.users WHERE role = N''admin''))
+UPDATE dbo.users SET role = N''admin'' WHERE id IN (SELECT id FROM firsts WHERE rn = 1);');
+IF COL_LENGTH(N'dbo.stores', N'profile_json') IS NULL
+  ALTER TABLE dbo.stores ADD profile_json NVARCHAR(MAX) NULL;
+IF COL_LENGTH(N'dbo.products', N'subcategory') IS NULL
+  ALTER TABLE dbo.products ADD subcategory NVARCHAR(60) NULL;
+IF COL_LENGTH(N'dbo.products', N'barcode') IS NULL
+  ALTER TABLE dbo.products ADD barcode NVARCHAR(32) NULL;
+IF COL_LENGTH(N'dbo.products', N'expires_on') IS NULL
+  ALTER TABLE dbo.products ADD expires_on DATE NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ux_products_store_barcode')
+  EXEC(N'CREATE UNIQUE INDEX ux_products_store_barcode ON dbo.products(store_id, barcode) WHERE barcode IS NOT NULL');
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_products_store_category')
+  EXEC(N'CREATE INDEX ix_products_store_category ON dbo.products(store_id, category, subcategory)');
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_products_store_name')
+  CREATE INDEX ix_products_store_name ON dbo.products(store_id, name);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_products_store_expiry')
+  EXEC(N'CREATE INDEX ix_products_store_expiry ON dbo.products(store_id, expires_on) WHERE expires_on IS NOT NULL');
+IF OBJECT_ID(N'dbo.categories', N'U') IS NULL
+CREATE TABLE dbo.categories (
+  id          UNIQUEIDENTIFIER NOT NULL CONSTRAINT pk_categories PRIMARY KEY,
+  store_id    UNIQUEIDENTIFIER NOT NULL CONSTRAINT fk_categories_store REFERENCES dbo.stores(id) ON DELETE CASCADE,
+  parent_id   UNIQUEIDENTIFIER NULL,
+  name        NVARCHAR(60)     NOT NULL,
+  final_sale  BIT              NOT NULL CONSTRAINT df_categories_final_sale DEFAULT 0,
+  created_at  DATETIME2(3)     NOT NULL CONSTRAINT df_categories_created DEFAULT SYSUTCDATETIME()
+);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ux_categories_store_parent_name')
+  CREATE UNIQUE INDEX ux_categories_store_parent_name ON dbo.categories(store_id, parent_id, name);`,
+  },
 ];
 
 const BOOTSTRAP_SQL = `
@@ -198,6 +247,14 @@ CREATE TABLE dbo.schema_migrations (
   app_version NVARCHAR(50)  NULL,
   applied_at  DATETIME2(3)  NOT NULL CONSTRAINT df_schema_migrations DEFAULT SYSUTCDATETIME()
 );`;
+
+// Run at every start after migration 6 (see adapters/azure.js init): idempotent.
+const ENSURE_ADMIN_SQL = `
+WITH firsts AS (
+  SELECT id, ROW_NUMBER() OVER (PARTITION BY store_id ORDER BY created_at, id) AS rn
+  FROM dbo.users
+  WHERE role = N'manager' AND active = 1 AND store_id NOT IN (SELECT store_id FROM dbo.users WHERE role = N'admin' AND active = 1))
+UPDATE dbo.users SET role = N'admin' WHERE id IN (SELECT id FROM firsts WHERE rn = 1);`;
 
 function pendingMigrations(appliedVersions) {
   const applied = new Set(appliedVersions);
@@ -214,4 +271,4 @@ function validateMigrations(list = MIGRATIONS) {
   return true;
 }
 
-module.exports = { MIGRATIONS, BOOTSTRAP_SQL, pendingMigrations, validateMigrations };
+module.exports = { MIGRATIONS, BOOTSTRAP_SQL, ENSURE_ADMIN_SQL, pendingMigrations, validateMigrations };

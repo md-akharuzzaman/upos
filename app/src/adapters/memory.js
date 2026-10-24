@@ -4,9 +4,15 @@
 // Used for local development (npm run dev) and unit tests in CI.
 
 const { MIGRATIONS } = require('../migrations');
+const { applyChange, outOfRange, matches } = require('../domain/reprice');
 
-const dup = (what) => Object.assign(new Error(`${what} already exists`), { code: 'DUPLICATE' });
+const dup = (what) => Object.assign(new Error(`${what} already exists`), { code: 'DUPLICATE', field: what });
 const clone = (x) => (x == null ? x : structuredClone(x));
+const noStore = (row) => {
+  const out = clone(row);
+  delete out.storeId;
+  return out;
+};
 
 function createMemoryDb() {
   const stores = new Map();
@@ -14,6 +20,7 @@ function createMemoryDb() {
   const products = new Map();
   const sales = new Map();
   const promotions = new Map();
+  const categories = new Map();
 
   const storeUsers = (storeId) => [...users.values()].filter((u) => u.storeId === storeId);
   const storeProducts = (storeId) => [...products.values()].filter((p) => p.storeId === storeId);
@@ -52,7 +59,7 @@ function createMemoryDb() {
       return stores.size;
     },
     async deleteStore(id) {
-      for (const m of [users, products, sales, promotions]) for (const [k, v] of m) if (v.storeId === id) m.delete(k);
+      for (const m of [users, products, sales, promotions, categories]) for (const [k, v] of m) if (v.storeId === id) m.delete(k);
       stores.delete(id);
     },
 
@@ -75,6 +82,12 @@ function createMemoryDb() {
       users.set(u.id, row);
       return clone(row);
     },
+    async updateUser(storeId, id, patch) {
+      const u = users.get(id);
+      if (!u || u.storeId !== storeId) return null;
+      Object.assign(u, patch);
+      return clone(u);
+    },
     async setUserActive(storeId, id, active) {
       const u = users.get(id);
       if (!u || u.storeId !== storeId) return null;
@@ -83,19 +96,59 @@ function createMemoryDb() {
     },
 
     // ---- products ----------------------------------------------------------
-    async listProducts(storeId, { q = '', includeInactive = false } = {}) {
+    async searchProducts(storeId, { q = '', includeInactive = false, category, subcategory, expiresBefore, limit = 50, offset = 0 } = {}) {
       const needle = q.toLowerCase();
-      return storeProducts(storeId)
+      const eq = (a, b) => String(a || '').toLowerCase() === String(b || '').toLowerCase();
+      const all = storeProducts(storeId)
         .filter((p) => includeInactive || p.active)
-        .filter((p) => !needle || p.name.toLowerCase().includes(needle) || p.sku.toLowerCase().includes(needle))
-        .sort((a, b) => a.name.localeCompare(b.name))
+        .filter(
+          (p) => !needle || p.name.toLowerCase().includes(needle) || p.sku.toLowerCase().includes(needle) || (p.barcode || '').toLowerCase().includes(needle),
+        )
+        .filter((p) => !category || eq(p.category, category))
+        .filter((p) => !subcategory || eq(p.subcategory, subcategory))
+        .filter((p) => !expiresBefore || (p.expiresOn && p.expiresOn <= expiresBefore))
+        .sort((a, b) => (expiresBefore ? a.expiresOn.localeCompare(b.expiresOn) : 0) || a.name.localeCompare(b.name));
+      return { items: all.slice(offset, offset + limit).map(clone), total: all.length };
+    },
+    async listProducts(storeId, opts = {}) {
+      return (await this.searchProducts(storeId, { ...opts, limit: 100000 })).items;
+    },
+    async findProductByCode(storeId, code) {
+      return clone(storeProducts(storeId).find((p) => p.barcode === code) || storeProducts(storeId).find((p) => p.sku === code) || null);
+    },
+    async findProductsByCodes(storeId, { skus = [], barcodes = [] }) {
+      const s = new Set(skus);
+      const b = new Set(barcodes);
+      return storeProducts(storeId)
+        .filter((p) => s.has(p.sku) || (p.barcode && b.has(p.barcode)))
         .map(clone);
     },
+    /** One "statement": validates everything first, then changes all or nothing. */
+    async repriceProducts(storeId, where, change, { dryRun = false, previewLimit = 50 } = {}) {
+      const targets = storeProducts(storeId)
+        .filter((p) => matches(p, where))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      const changes = targets.map((p) => applyChange(p, change));
+      const bad = changes.find(outOfRange);
+      const result = {
+        count: targets.length,
+        preview: changes.slice(0, previewLimit),
+        invalid: bad ? { sku: bad.sku, priceCents: bad.after.priceCents } : null,
+      };
+      if (dryRun || bad || (where.ids && targets.length !== where.ids.length)) return result;
+      const now = new Date().toISOString();
+      for (const c of changes) Object.assign(products.get(c.id), c.after, { updatedAt: now });
+      return result;
+    },
     async getProductsByIds(storeId, ids) {
-      return ids.map((id) => products.get(id)).filter((p) => p && p.storeId === storeId).map(clone);
+      return ids
+        .map((id) => products.get(id))
+        .filter((p) => p && p.storeId === storeId)
+        .map(clone);
     },
     async createProduct(storeId, p) {
       if (storeProducts(storeId).some((x) => x.sku === p.sku)) throw dup('sku');
+      if (p.barcode && storeProducts(storeId).some((x) => x.barcode === p.barcode)) throw dup('barcode');
       const row = { category: 'General', taxRateBp: 1300, stock: 0, refundable: true, ...p, storeId, active: true, updatedAt: new Date().toISOString() };
       products.set(p.id, row);
       return clone(row);
@@ -104,6 +157,7 @@ function createMemoryDb() {
       const p = products.get(id);
       if (!p || p.storeId !== storeId) return null;
       if (patch.sku && patch.sku !== p.sku && storeProducts(storeId).some((x) => x.sku === patch.sku)) throw dup('sku');
+      if (patch.barcode && storeProducts(storeId).some((x) => x.id !== id && x.barcode === patch.barcode)) throw dup('barcode');
       Object.assign(p, patch, { updatedAt: new Date().toISOString() });
       return clone(p);
     },
@@ -116,10 +170,13 @@ function createMemoryDb() {
     async saveProducts(storeId, items) {
       const mine = storeProducts(storeId);
       const skus = new Map(mine.map((p) => [p.sku, p.id]));
+      const codes = new Map(mine.filter((p) => p.barcode).map((p) => [p.barcode, p.id]));
       for (const it of items) {
         if (!it.create && !products.has(it.id)) throw Object.assign(new Error(`product ${it.id} not found`), { status: 404 });
         if (it.sku !== undefined && skus.has(it.sku) && skus.get(it.sku) !== it.id) throw dup('sku');
         if (it.sku !== undefined) skus.set(it.sku, it.id);
+        if (it.barcode && codes.has(it.barcode) && codes.get(it.barcode) !== it.id) throw dup('barcode');
+        if (it.barcode) codes.set(it.barcode, it.id);
       }
       const now = new Date().toISOString();
       const out = [];
@@ -135,6 +192,37 @@ function createMemoryDb() {
         }
       }
       return out;
+    },
+
+    // ---- categories --------------------------------------------------------
+    async listCategories(storeId) {
+      return [...categories.values()]
+        .filter((c) => c.storeId === storeId)
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(noStore);
+    },
+    async createCategory(storeId, c) {
+      const clash = [...categories.values()].some(
+        (x) => x.storeId === storeId && (x.parentId || null) === (c.parentId || null) && x.name.toLowerCase() === c.name.toLowerCase(),
+      );
+      if (clash) throw dup('category');
+      const row = { finalSale: false, ...c, parentId: c.parentId || null, storeId, createdAt: new Date().toISOString() };
+      categories.set(c.id, row);
+      return noStore(row);
+    },
+    async updateCategory(storeId, id, patch) {
+      const c = categories.get(id);
+      if (!c || c.storeId !== storeId) return null;
+      if (
+        patch.name &&
+        [...categories.values()].some(
+          (x) => x.id !== id && x.storeId === storeId && x.parentId === c.parentId && x.name.toLowerCase() === patch.name.toLowerCase(),
+        )
+      ) {
+        throw dup('category');
+      }
+      Object.assign(c, patch);
+      return noStore(c);
     },
 
     // ---- promotions --------------------------------------------------------
@@ -249,6 +337,9 @@ function createMemorySecrets() {
     },
     async set(name, value) {
       secrets.set(name, value);
+    },
+    async remove(name) {
+      secrets.delete(name);
     },
   };
 }
