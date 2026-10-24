@@ -7,7 +7,12 @@
 //     LAST units of a line returns exactly the tax still held for that line,
 //     so all refunds of a sale always add up to its original total;
 //   - money goes back the way it came (cash -> cash, card -> card reversal);
-//   - when every unit is refunded the sale's status becomes 'refunded'.
+//   - when every unit is refunded the sale's status becomes 'refunded';
+//   - store policy (v2.2): items sold as final sale (refundable = false, e.g.
+//     food) and sales older than the store's refund window are refused unless
+//     a manager overrides the policy with a written reason;
+//   - with promotions, a refund pays back what the customer actually paid per
+//     unit (the discounted price), never the list price.
 // Sales refunded as a whole by v2.0 have status 'refunded' and no refund rows;
 // they are treated as fully refunded.
 
@@ -55,13 +60,23 @@ function normaliseRefundItems(raw) {
   return [...merged].map(([lineNo, qty]) => ({ lineNo, qty }));
 }
 
+const DAY_MS = 86400000;
+
+/** Last moment a sale can be refunded under a window of `days` days (ISO string), or null when unlimited. */
+function refundDeadline(sale, days) {
+  if (days === undefined || days === null) return null;
+  return new Date(new Date(sale.createdAt).getTime() + days * DAY_MS).toISOString();
+}
+
 /**
  * Plans a refund against a sale (raw or already decorated).
  * @param sale the sale with its lines and earlier refunds
  * @param requested [{lineNo, qty}] or undefined for "everything not yet refunded"
+ * @param policy { windowDays, now, override } - store refund policy; override skips it
  * @returns {{lines, subtotalCents, taxCents, totalCents, completesSale}}
  */
-function planRefund(sale, requested) {
+function planRefund(sale, requested, policy = {}) {
+  const { windowDays, now = new Date(), override = false } = policy;
   const s = sale.refundState ? sale : withRefundTotals(sale);
   const remaining = new Map(
     s.lines.map((l) => [
@@ -69,19 +84,28 @@ function planRefund(sale, requested) {
       { line: l, qty: l.qty - l.refundedQty, sub: l.lineSubtotalCents - l.refundedSubtotalCents, tax: l.lineTaxCents - l.refundedTaxCents },
     ]),
   );
+  const refundable = (l) => override || l.refundable !== false; // null = sold before v2.2: refundable
+  const left = [...remaining.values()].filter((r) => r.qty > 0);
+  if (left.length === 0) throw err('sale is already refunded', 'NOTHING_TO_REFUND', 409);
+  const deadline = refundDeadline(s, windowDays);
+  if (!override && deadline && new Date(now).getTime() > new Date(deadline).getTime()) {
+    throw err(`the ${windowDays}-day refund window for this sale ended on ${deadline.slice(0, 10)}`, 'POLICY', 409);
+  }
   const wanted =
     requested === undefined
-      ? [...remaining.values()].filter((r) => r.qty > 0).map((r) => ({ lineNo: r.line.lineNo, qty: r.qty }))
+      ? left.filter((r) => refundable(r.line)).map((r) => ({ lineNo: r.line.lineNo, qty: r.qty }))
       : normaliseRefundItems(requested);
-  if (wanted.length === 0) throw err('sale is already refunded', 'NOTHING_TO_REFUND', 409);
+  if (wanted.length === 0) throw err('the items left on this sale are final sale', 'POLICY', 409);
 
   const lines = wanted.map(({ lineNo, qty }) => {
     const r = remaining.get(lineNo);
     if (!r) throw err(`line ${lineNo} is not on this sale`, 'INVALID', 400);
     if (r.qty === 0) throw err(`${r.line.name} is already fully refunded`, 'OVER_REFUND', 409);
     if (qty > r.qty) throw err(`only ${r.qty} × ${r.line.name} can still be refunded`, 'OVER_REFUND', 409);
+    if (!refundable(r.line)) throw err(`${r.line.name} was sold as final sale`, 'POLICY', 409);
     const last = qty === r.qty;
-    const subtotal = last ? r.sub : r.line.unitPriceCents * qty;
+    // price actually paid per unit (after any promotion); exact, since discounts are per unit
+    const subtotal = last ? r.sub : Math.round((r.line.lineSubtotalCents * qty) / r.line.qty);
     const tax = last ? r.tax : roundHalfUp((subtotal * r.line.taxRateBp) / 10000);
     return {
       lineNo,
@@ -100,4 +124,4 @@ function planRefund(sale, requested) {
   return { lines, subtotalCents, taxCents, totalCents: subtotalCents + taxCents, completesSale };
 }
 
-module.exports = { withRefundTotals, planRefund, normaliseRefundItems };
+module.exports = { withRefundTotals, planRefund, normaliseRefundItems, refundDeadline };

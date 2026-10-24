@@ -4,6 +4,8 @@
 // basis points (1300 = 13 % HST). Tax is rounded half-up per line, which is
 // what the React register shows as a preview (web/src/lib/money.js).
 
+const { bestPromotion } = require('./promotions');
+
 const MAX_QTY_PER_LINE = 999;
 const MAX_LINES = 100;
 
@@ -19,11 +21,16 @@ function lineTotals(unitPriceCents, qty, taxRateBp) {
 
 /**
  * Price a basket.
- * @param {Array<{product: {id, sku, name, priceCents, taxRateBp}, qty: number}>} items
+ * @param {Array<{product: {id, sku, name, category, priceCents, taxRateBp, refundable}, qty: number}>} items
+ * @param {Array} promotions running promotions of the store (best one per line applies)
+ * @param {Date|string} now
  */
-function priceBasket(items) {
+function priceBasket(items, promotions = [], now = new Date()) {
   const lines = items.map(({ product, qty }, i) => {
-    const t = lineTotals(product.priceCents, qty, product.taxRateBp);
+    const best = bestPromotion(product, promotions, now);
+    const discount = best ? best.unitDiscountCents * qty : 0;
+    const subtotal = product.priceCents * qty - discount;
+    const tax = roundHalfUp((subtotal * product.taxRateBp) / 10000);
     return {
       lineNo: i + 1,
       productId: product.id,
@@ -32,13 +39,17 @@ function priceBasket(items) {
       qty,
       unitPriceCents: product.priceCents,
       taxRateBp: product.taxRateBp,
-      lineSubtotalCents: t.subtotal,
-      lineTaxCents: t.tax,
+      discountCents: discount,
+      promotionName: best ? best.promotion.name : null,
+      refundable: product.refundable !== false,
+      lineSubtotalCents: subtotal,
+      lineTaxCents: tax,
     };
   });
   const subtotalCents = lines.reduce((s, l) => s + l.lineSubtotalCents, 0);
   const taxCents = lines.reduce((s, l) => s + l.lineTaxCents, 0);
-  return { lines, subtotalCents, taxCents, totalCents: subtotalCents + taxCents };
+  const discountCents = lines.reduce((s, l) => s + l.discountCents, 0);
+  return { lines, subtotalCents, taxCents, discountCents, totalCents: subtotalCents + taxCents };
 }
 
 /** Validates the raw request basket shape; merges duplicate product ids. */
