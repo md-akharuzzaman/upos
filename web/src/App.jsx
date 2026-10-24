@@ -6,11 +6,13 @@ import Products from './components/Products.jsx';
 import Sales from './components/Sales.jsx';
 import Report from './components/Report.jsx';
 import Team from './components/Team.jsx';
+import Promotions from './components/Promotions.jsx';
 
 const TABS = [
   { id: 'register', label: 'Register' },
   { id: 'sales', label: 'Sales' },
   { id: 'products', label: 'Products', manager: true },
+  { id: 'promotions', label: 'Promotions', manager: true },
   { id: 'report', label: 'Report', manager: true },
   { id: 'team', label: 'Staff', manager: true },
 ];
@@ -75,7 +77,10 @@ export default function App() {
             {tab === 'sales' && <Sales token={s.token} currency={s.store.currency} isManager={s.user.role === 'manager'} onAuthError={signOut} />}
             {tab === 'products' && <Products token={s.token} currency={s.store.currency} onAuthError={signOut} />}
             {tab === 'report' && <Report token={s.token} currency={s.store.currency} onAuthError={signOut} />}
-            {tab === 'team' && <Team token={s.token} me={s.user} onAuthError={signOut} />}
+            {tab === 'promotions' && <Promotions token={s.token} currency={s.store.currency} onAuthError={signOut} />}
+            {tab === 'team' && (
+              <Team token={s.token} me={s.user} store={s.store} onStoreChange={(store) => signedIn({ ...s, store })} onAuthError={signOut} />
+            )}
           </main>
         </>
       )}

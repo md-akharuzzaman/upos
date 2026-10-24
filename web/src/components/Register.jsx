@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import { api } from '../api.js';
-import { cartTotals, formatMoney } from '../lib/money.js';
+import { bestPromotion, cartTotals, formatMoney } from '../lib/money.js';
 import Cart from './Cart.jsx';
 import CheckoutDialog from './CheckoutDialog.jsx';
 import Receipt from './Receipt.jsx';
@@ -17,6 +17,9 @@ export default function Register({ token, currency, onAuthError }) {
 
   const fetchProducts = useCallback(() => api('/api/products', { token }), [token]);
   const [products, load, loadError] = useLoader(fetchProducts, onAuthError, []);
+  // running promotions, for the price preview (the server applies them again at checkout)
+  const fetchPromos = useCallback(() => api('/api/promotions?running=1', { token }).catch(() => []), [token]);
+  const [promotions, reloadPromos] = useLoader(fetchPromos, onAuthError, []);
 
   const categories = useMemo(() => ['All', ...new Set(products.map((p) => p.category))], [products]);
   const shown = products.filter(
@@ -46,6 +49,7 @@ export default function Register({ token, currency, onAuthError }) {
       setCheckout(false);
       setLines([]);
       load();
+      reloadPromos();
     } catch (err) {
       if (err.status === 401) onAuthError();
       setError(err.message);
@@ -75,17 +79,31 @@ export default function Register({ token, currency, onAuthError }) {
         </div>
         {products.length === 0 && <p className="empty">No products yet. A manager can add them under Products.</p>}
         <div className="grid">
-          {shown.map((p) => (
-            <button key={p.id} className="tile" onClick={() => add(p)} disabled={p.stock < 1} aria-label={`Add ${p.name}`}>
+          {shown.map((p) => {
+            const promo = bestPromotion(p, promotions);
+            return (
+            <button key={p.id} className={promo ? 'tile promo' : 'tile'} onClick={() => add(p)} disabled={p.stock < 1} aria-label={`Add ${p.name}`}>
               <span className="t-name">{p.name}</span>
-              <span className="t-price">{formatMoney(p.priceCents, currency)}</span>
-              <span className={p.stock < 5 ? 't-stock low' : 't-stock'}>{p.stock < 1 ? 'Out of stock' : `${p.stock} in stock`}</span>
+              {promo ? (
+                <span className="t-price">
+                  <s>{formatMoney(p.priceCents, currency)}</s> {formatMoney(p.priceCents - promo.unitDiscountCents, currency)}
+                  <small className="t-promo">{promo.promotion.name}</small>
+                </span>
+              ) : (
+                <span className="t-price">{formatMoney(p.priceCents, currency)}</span>
+              )}
+              <span className={p.stock < 5 ? 't-stock low' : 't-stock'}>
+                {p.stock < 1 ? 'Out of stock' : `${p.stock} in stock`}
+                {p.refundable === false ? ' · final sale' : ''}
+              </span>
             </button>
-          ))}
+            );
+          })}
         </div>
       </section>
       <Cart
         lines={lines}
+        promotions={promotions}
         currency={currency}
         onQty={(id, qty) => setLines((ls) => ls.map((l) => (l.product.id === id ? { ...l, qty } : l)))}
         onRemove={(id) => setLines((ls) => ls.filter((l) => l.product.id !== id))}
@@ -97,7 +115,7 @@ export default function Register({ token, currency, onAuthError }) {
       />
       {checkout && (
         <CheckoutDialog
-          totalCents={cartTotals(lines).total}
+          totalCents={cartTotals(lines, promotions).total}
           currency={currency}
           busy={busy}
           error={error}

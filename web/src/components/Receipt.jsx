@@ -20,6 +20,13 @@ export default function Receipt({ receipt, onClose, closeLabel = 'New sale', ext
                 <tr key={l.lineNo ?? l.sku}>
                   <td>
                     {l.qty} × {l.name}
+                    {l.refundable === false && <span title="Final sale"> *</span>}
+                    {l.discountCents > 0 && (
+                      <small className="line-promo">
+                        <br />
+                        {l.promotionName} −{formatMoney(l.discountCents, c)}
+                      </small>
+                    )}
                     {l.refundedQty > 0 && receipt.status !== 'refunded' && (
                       <span className="refunded-note"> · {l.refundedQty === l.qty ? 'refunded' : `${l.refundedQty} refunded`}</span>
                     )}
@@ -30,6 +37,14 @@ export default function Receipt({ receipt, onClose, closeLabel = 'New sale', ext
             </tbody>
           </table>
           <dl className="totals">
+            {receipt.discountCents > 0 && (
+              <>
+                <dt>You saved</dt>
+                <dd className="saving" data-testid="receipt-savings">
+                  {formatMoney(receipt.discountCents, c)}
+                </dd>
+              </>
+            )}
             <dt>Subtotal</dt>
             <dd>{formatMoney(receipt.subtotalCents, c)}</dd>
             <dt>Tax</dt>
@@ -76,6 +91,11 @@ export default function Receipt({ receipt, onClose, closeLabel = 'New sale', ext
                 </tr>
               </tbody>
             </table>
+          )}
+          {receipt.policy && (
+            <p className="muted center policy" data-testid="receipt-policy">
+              {receipt.policy}
+            </p>
           )}
           <p className="muted center">Thank you!</p>
         </div>

@@ -116,3 +116,24 @@ tr.clickable { cursor: pointer; } tr.clickable:hover td { background: var(--bg);
 .refund .num, .refunds .num { text-align: right; }
 .receipt .refunds { margin: 4px 0; font-size: 14px; }
 .receipt .refunded-note { color: #8a4b00; font-size: 12px; }
+
+/* v2.2 store management */
+.tile.promo { border-color: #c2410c; }
+.tile .t-price s { color: var(--muted); font-weight: 400; margin-right: 4px; }
+.t-promo, .cl-promo, .line-promo { display: block; color: #c2410c; font-size: 12px; font-weight: 600; }
+.saving { color: #c2410c; font-weight: 700; }
+.policy { font-size: 12px; }
+.final { color: var(--bad); }
+.notice { background: #fff4e5; color: #8a4b00; border-radius: 8px; padding: 8px 12px; margin: 0; }
+.ok { color: var(--ok); font-weight: 600; }
+.bad { color: var(--bad); }
+.check { display: flex; align-items: center; gap: 6px; flex-direction: row; }
+.dialog.wide { width: min(760px, 100%); max-height: 92vh; overflow: auto; }
+.dialog fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.dialog .scroll { max-height: 280px; overflow: auto; }
+tr.bad td { color: var(--bad); }
+.page-head .actions { margin-left: auto; }
+.kpi small { display: block; font-size: 12px; }
+label.check { flex-direction: row; align-items: center; justify-content: flex-start; gap: 8px; text-align: left; }
+label.check input[type='checkbox'], label.check input[type='radio'] { width: auto; flex: none; margin: 0; }
+label.check select, label.check input:not([type]) { width: auto; }

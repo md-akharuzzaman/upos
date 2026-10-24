@@ -26,9 +26,10 @@ export const session = {
 };
 
 export class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, body = null) {
     super(message);
     this.status = status;
+    this.body = body; // the JSON error body, e.g. per-row import errors
   }
 }
 
@@ -48,6 +49,6 @@ export async function api(path, { method = 'GET', body, token } = {}) {
   } catch {
     /* non-JSON */
   }
-  if (!res.ok) throw new ApiError(res.status, data?.error || `Request failed (${res.status})`);
+  if (!res.ok) throw new ApiError(res.status, data?.error || `Request failed (${res.status})`, data);
   return data;
 }

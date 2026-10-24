@@ -3,16 +3,25 @@ import { api } from '../api.js';
 import { formatMoney, refundPreview } from '../lib/money.js';
 
 // Manager-only: refund chosen items from a receipt. The server re-prices and
-// re-checks everything; this screen only previews the amount.
-export default function RefundItems({ receipt, token, onCancel, onDone }) {
+// re-checks everything (including the store's refund policy); this screen
+// only previews the amount and explains the policy.
+export default function RefundItems({ receipt, token, onCancel, onDone, now: nowProp }) {
   const c = receipt.store?.currency || 'CAD';
+  const [opened] = useState(() => Date.now()); // the moment the dialog opened
+  const now = nowProp ?? opened;
   const [qty, setQty] = useState({});
   const [reason, setReason] = useState('');
+  const [override, setOverride] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const left = (l) => l.qty - (l.refundedQty || 0);
-  const t = refundPreview(receipt.lines, qty);
+  const expired = Boolean(receipt.refundBy) && now > Date.parse(receipt.refundBy);
+  const allowed = (l) => override || (!expired && l.refundable !== false);
+  const policyBlocks = expired || receipt.lines.some((l) => l.refundable === false && left(l) > 0);
+  const chosen = Object.fromEntries(Object.entries(qty).filter(([lineNo]) => allowed(receipt.lines.find((l) => l.lineNo === Number(lineNo)))));
+  const t = refundPreview(receipt.lines, chosen);
   const cash = receipt.payment.method === 'cash';
+  const reasonOk = !override || reason.trim().length >= 5;
 
   const set = (lineNo, v, max) => {
     const n = Math.max(0, Math.min(max, Number.parseInt(v, 10) || 0));
@@ -21,17 +30,17 @@ export default function RefundItems({ receipt, token, onCancel, onDone }) {
 
   async function submit(e) {
     e.preventDefault();
-    if (t.items === 0) return;
+    if (t.items === 0 || !reasonOk) return;
     setBusy(true);
     setError('');
     try {
-      const items = Object.entries(qty)
+      const items = Object.entries(chosen)
         .filter(([, q]) => q > 0)
         .map(([lineNo, q]) => ({ lineNo: Number(lineNo), qty: q }));
       const out = await api(`/api/sales/${receipt.saleId}/refunds`, {
         method: 'POST',
         token,
-        body: { items, reason: reason.trim() || undefined },
+        body: { items, reason: reason.trim() || undefined, ...(override ? { override: true } : {}) },
       });
       onDone(out);
     } catch (err) {
@@ -46,7 +55,13 @@ export default function RefundItems({ receipt, token, onCancel, onDone }) {
         <h2 id="refund-title">Refund items</h2>
         <p className="muted">
           Receipt <b>#{receipt.receiptNo}</b> · choose how many of each item come back.
+          {receipt.refundBy && !expired && <> Refundable until {new Date(receipt.refundBy).toLocaleDateString('en-CA')}.</>}
         </p>
+        {expired && (
+          <p className="notice" role="status">
+            The refund window for this sale ended on {new Date(receipt.refundBy).toLocaleDateString('en-CA')}.
+          </p>
+        )}
         <table>
           <thead>
             <tr>
@@ -61,8 +76,9 @@ export default function RefundItems({ receipt, token, onCancel, onDone }) {
                 <td>
                   {l.name}
                   <small>
-                    {formatMoney(l.unitPriceCents, c)} · sold {l.qty}
+                    {formatMoney(Math.round(l.lineSubtotalCents / l.qty), c)} paid each · sold {l.qty}
                     {l.refundedQty ? ` · ${l.refundedQty} refunded` : ''}
+                    {l.refundable === false && <b className="final"> · Final sale</b>}
                   </small>
                 </td>
                 <td className="num">{left(l)}</td>
@@ -71,9 +87,9 @@ export default function RefundItems({ receipt, token, onCancel, onDone }) {
                     type="number"
                     min="0"
                     max={left(l)}
-                    disabled={left(l) === 0}
+                    disabled={left(l) === 0 || !allowed(l)}
                     aria-label={`Refund quantity for ${l.name}`}
-                    value={qty[l.lineNo] ?? 0}
+                    value={allowed(l) ? (qty[l.lineNo] ?? 0) : 0}
                     onChange={(e) => set(l.lineNo, e.target.value, left(l))}
                   />
                 </td>
@@ -81,11 +97,21 @@ export default function RefundItems({ receipt, token, onCancel, onDone }) {
             ))}
           </tbody>
         </table>
-        <button type="button" className="link" onClick={() => setQty(Object.fromEntries(receipt.lines.map((l) => [l.lineNo, left(l)])))}>
+        <button
+          type="button"
+          className="link"
+          onClick={() => setQty(Object.fromEntries(receipt.lines.filter(allowed).map((l) => [l.lineNo, left(l)])))}
+        >
           Select everything left
         </button>
+        {policyBlocks && (
+          <label className="check">
+            <input type="checkbox" checked={override} onChange={(e) => setOverride(e.target.checked)} />
+            Override the store refund policy (manager) — a reason is required and recorded
+          </label>
+        )}
         <label>
-          Reason (optional)
+          {override ? 'Reason (required for an override)' : 'Reason (optional)'}
           <input value={reason} maxLength={200} onChange={(e) => setReason(e.target.value)} placeholder="e.g. damaged, wrong item" />
         </label>
         <dl className="totals">
@@ -112,7 +138,7 @@ export default function RefundItems({ receipt, token, onCancel, onDone }) {
           <button type="button" onClick={onCancel} disabled={busy}>
             Back
           </button>
-          <button className="danger" disabled={t.items === 0 || busy}>
+          <button className="danger" disabled={t.items === 0 || busy || !reasonOk}>
             {busy ? 'Saving…' : `Refund ${formatMoney(t.total, c)}`}
           </button>
         </div>

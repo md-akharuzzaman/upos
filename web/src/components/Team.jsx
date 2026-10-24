@@ -2,9 +2,24 @@ import { useCallback, useState } from 'react';
 import { api } from '../api.js';
 import { useLoader } from '../lib/useLoader.js';
 
-export default function Team({ token, me, onAuthError }) {
+export default function Team({ token, me, store, onStoreChange, onAuthError }) {
   const [form, setForm] = useState({ name: '', email: '', password: '', role: 'cashier' });
   const [error, setError] = useState('');
+  const [days, setDays] = useState(String(store?.refundWindowDays ?? 30));
+  const [saved, setSaved] = useState('');
+
+  async function savePolicy(e) {
+    e.preventDefault();
+    setError('');
+    setSaved('');
+    try {
+      const s = await api('/api/store/settings', { method: 'PATCH', token, body: { refundWindowDays: Number.parseInt(days, 10) } });
+      onStoreChange?.({ ...store, ...s });
+      setSaved(`Saved: refunds within ${s.refundWindowDays} days.`);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
 
   const fetchRows = useCallback(() => api('/api/users', { token }), [token]);
   const [rows, load, loadError] = useLoader(fetchRows, onAuthError, []);
@@ -32,7 +47,20 @@ export default function Team({ token, me, onAuthError }) {
 
   return (
     <section className="page">
-      <h2>Staff</h2>
+      <h2>Staff and store policy</h2>
+      <form className="card inline-form" onSubmit={savePolicy} aria-label="Refund policy">
+        <label>
+          Refund window (days)
+          <input value={days} onChange={(e) => setDays(e.target.value)} inputMode="numeric" size={4} />
+        </label>
+        <button>Save policy</button>
+        <span className="hint">Printed on every receipt. Final-sale items are set per product on the Products page.</span>
+        {saved && (
+          <span className="ok" role="status">
+            {saved}
+          </span>
+        )}
+      </form>
       <form className="card inline-form" onSubmit={add} aria-label="Add staff member">
         <label className="grow">
           Name

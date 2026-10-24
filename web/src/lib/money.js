@@ -8,15 +8,51 @@ export function lineTotals(unitPriceCents, qty, taxRateBp) {
   return { subtotal, tax, total: subtotal + tax };
 }
 
-export function cartTotals(lines) {
+// ---- promotions: same rules as app/src/domain/promotions.js -----------------
+export function isRunning(p, now = new Date()) {
+  const t = new Date(now).getTime();
+  return p.active !== false && new Date(p.startsAt).getTime() <= t && (!p.endsAt || t < new Date(p.endsAt).getTime());
+}
+
+function appliesTo(p, product) {
+  if (p.target === 'all') return true;
+  if (p.target === 'category') return String(p.category || '').toLowerCase() === String(product.category || '').toLowerCase();
+  return (p.skus || []).includes(product.sku);
+}
+
+/** Best running promotion for a product: { promotion, unitDiscountCents } or null. */
+export function bestPromotion(product, promotions = [], now = new Date()) {
+  let best = null;
+  for (const p of promotions) {
+    if (!isRunning(p, now) || !appliesTo(p, product)) continue;
+    const raw = p.kind === 'percent' ? Math.round((product.priceCents * p.value) / 10000) : p.value;
+    const d = Math.max(0, Math.min(product.priceCents, raw));
+    if (d > 0 && (!best || d > best.unitDiscountCents)) best = { promotion: p, unitDiscountCents: d };
+  }
+  return best;
+}
+
+/** One register line: list price, promotion discount, then tax on the discounted amount. */
+export function priceLine(product, qty, promotions = [], now = new Date()) {
+  const best = bestPromotion(product, promotions, now);
+  const discount = best ? best.unitDiscountCents * qty : 0;
+  const subtotal = product.priceCents * qty - discount;
+  const raw = (subtotal * product.taxRateBp) / 10000;
+  const tax = Math.sign(raw) * Math.round(Math.abs(raw));
+  return { list: product.priceCents * qty, discount, subtotal, tax, total: subtotal + tax, promotion: best?.promotion ?? null };
+}
+
+export function cartTotals(lines, promotions = [], now = new Date()) {
   let subtotal = 0;
   let tax = 0;
+  let discount = 0;
   for (const l of lines) {
-    const t = lineTotals(l.product.priceCents, l.qty, l.product.taxRateBp);
+    const t = priceLine(l.product, l.qty, promotions, now);
     subtotal += t.subtotal;
     tax += t.tax;
+    discount += t.discount;
   }
-  return { subtotal, tax, total: subtotal + tax, items: lines.reduce((n, l) => n + l.qty, 0) };
+  return { subtotal, tax, discount, total: subtotal + tax, items: lines.reduce((n, l) => n + l.qty, 0) };
 }
 
 export function formatMoney(cents, currency = 'CAD') {
@@ -55,7 +91,7 @@ export function refundPreview(lines, qty) {
       subtotal += l.lineSubtotalCents - (l.refundedSubtotalCents || 0);
       tax += l.lineTaxCents - (l.refundedTaxCents || 0);
     } else {
-      const s = l.unitPriceCents * q;
+      const s = Math.round((l.lineSubtotalCents * q) / l.qty); // price actually paid per unit
       const raw = (s * l.taxRateBp) / 10000;
       subtotal += s;
       tax += Math.sign(raw) * Math.round(Math.abs(raw));

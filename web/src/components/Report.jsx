@@ -30,6 +30,10 @@ export default function Report({ token, currency, onAuthError }) {
               <b data-testid="report-gross">{formatMoney(r.grossCents, currency)}</b>
             </div>
             <div className="card kpi">
+              <span>Promotion discounts</span>
+              <b data-testid="report-discounts">−{formatMoney(r.discountCents, currency)}</b>
+            </div>
+            <div className="card kpi">
               <span>Refunded</span>
               <b data-testid="report-refunded">−{formatMoney(r.refundedCents, currency)}</b>
             </div>
@@ -52,6 +56,7 @@ export default function Report({ token, currency, onAuthError }) {
             <div className="card kpi">
               <span>Refunds</span>
               <b data-testid="report-refunds">{r.refundsCount}</b>
+              {r.overridesCount > 0 && <small className="bad">{r.overridesCount} policy override(s)</small>}
             </div>
           </div>
           <div className="two">
