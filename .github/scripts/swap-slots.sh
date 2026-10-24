@@ -20,7 +20,9 @@ junit=${5:-reports/smoke-swap-preview.xml}
 swap() { az webapp deployment slot swap -g "$rg" -n "$app" --slot staging --target-slot production --action "$1" -o none; }
 reset() {
   echo "::warning::swap cancelled - resetting the preview, production is unchanged"
-  swap reset || echo "::error::reset failed - run: az webapp deployment slot swap -g $rg -n $app --slot staging --action reset"
+  # reset takes no --target-slot (Azure: "slots/production not found")
+  az webapp deployment slot swap -g "$rg" -n "$app" --slot staging --action reset -o none ||
+    echo "::error::reset failed - run: az webapp deployment slot swap -g $rg -n $app --slot staging --action reset"
   exit 1
 }
 
@@ -28,7 +30,19 @@ echo "phase 1/3: preview - apply production settings to the staging slot ($(date
 swap preview || reset
 
 echo "phase 2/3: wait until the staging slot is healthy with production settings"
-args=(--url "$url" --expect-env prod --expect-slot production --wait 900 --junit "$junit")
+# The preview call returns before the slot has restarted: wait until it reports
+# the production slot settings (and the release version), then smoke test it.
+deadline=$((SECONDS + 900))
+until info=$(curl -fsS -m 10 "$url/api/info" 2>/dev/null) && [ "$(jq -r .slot <<<"$info")" = production ] &&
+  { [ -z "$version" ] || [ "$(jq -r .version <<<"$info")" = "$version" ]; }; do
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    echo "::error::the staging slot did not restart with production settings within 15 min"
+    reset
+  fi
+  sleep 10
+done
+echo "staging slot restarted with production settings"
+args=(--url "$url" --expect-env prod --expect-slot production --wait 600 --junit "$junit")
 if [ -n "$version" ]; then args+=(--expect-version "$version"); fi
 node tests/smoke.mjs "${args[@]}" || reset
 
