@@ -30,6 +30,18 @@ export default function Report({ token, currency, onAuthError }) {
               <b data-testid="report-gross">{formatMoney(r.grossCents, currency)}</b>
             </div>
             <div className="card kpi">
+              <span>Promotion discounts</span>
+              <b data-testid="report-discounts">−{formatMoney(r.discountCents, currency)}</b>
+            </div>
+            <div className="card kpi">
+              <span>Refunded</span>
+              <b data-testid="report-refunded">−{formatMoney(r.refundedCents, currency)}</b>
+            </div>
+            <div className="card kpi">
+              <span>Net sales</span>
+              <b data-testid="report-net">{formatMoney(r.netSalesCents ?? r.grossCents, currency)}</b>
+            </div>
+            <div className="card kpi">
               <span>Transactions</span>
               <b data-testid="report-count">{r.salesCount}</b>
             </div>
@@ -43,7 +55,8 @@ export default function Report({ token, currency, onAuthError }) {
             </div>
             <div className="card kpi">
               <span>Refunds</span>
-              <b>{r.refundsCount}</b>
+              <b data-testid="report-refunds">{r.refundsCount}</b>
+              {r.overridesCount > 0 && <small className="bad">{r.overridesCount} policy override(s)</small>}
             </div>
           </div>
           <div className="two">
@@ -52,7 +65,7 @@ export default function Report({ token, currency, onAuthError }) {
                 <tr>
                   <th>Payment</th>
                   <th className="num">Count</th>
-                  <th className="num">Total</th>
+                  <th className="num">Net total</th>
                 </tr>
               </thead>
               <tbody>

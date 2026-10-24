@@ -1,6 +1,6 @@
 {
   "name": "eurc-pos-web",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "private": true,
   "description": "eURC Point of Sale front end (React + Vite) - Hands-on Project 02",
   "type": "module",
@@ -18,7 +18,9 @@
   },
   "dependencies": {
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "read-excel-file": "^9.3.12",
+    "write-excel-file": "^4.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

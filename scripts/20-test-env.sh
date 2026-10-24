@@ -98,8 +98,14 @@ for ENV in "${TARGETS[@]}"; do
     check_ge "prod: activity-log alerts (slot swap)" 1 "$(az monitor activity-log alert list -g "$RG" --query 'length(@)' -o tsv)"
     check_ge "prod: availability test" 1 "$(az resource list -g "$RG" --resource-type Microsoft.Insights/webtests --query 'length(@)' -o tsv)"
     # Reachability from the internet (Cloud Shell): must be refused.
-    kv_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://${KV}.vault.azure.net/secrets?api-version=7.4" || echo 000)
-    check "prod: Key Vault refuses internet (403, not 401)" 403 "$kv_code"
+    # Key Vault answers an outside caller with 401 (no token) or 403
+    # ForbiddenByRbac (token but no data role) before its network rule shows,
+    # so a probe from here cannot prove the network block. Check the setting
+    # itself; the app's own health check proves the private path works.
+    check "prod: Key Vault public network access" Disabled \
+      "$(az keyvault show -g "$RG" -n "$KV" --query properties.publicNetworkAccess -o tsv)"
+    check "prod: Key Vault network default action" Deny \
+      "$(az keyvault show -g "$RG" -n "$KV" --query properties.networkAcls.defaultAction -o tsv)"
     st_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://${ST}.blob.core.windows.net/pos-receipts?restype=container" || echo 000)
     check "prod: Storage refuses internet (HTTP 403)" 403 "$st_code"
   else

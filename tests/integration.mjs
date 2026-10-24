@@ -122,9 +122,29 @@ try {
     return `gross ${r.body.grossCents} cents, ${r.body.salesCount} sales`;
   });
 
+  await suite.check('item refund: one coffee back, stock and receipt updated (v2.1)', async () => {
+    const r = await api.call('POST', `/api/sales/${cashSale.id}/refunds`, {
+      token: mgr.token,
+      body: { items: [{ lineNo: 1, qty: 1 }], reason: 'integration test' },
+    });
+    assert(r.status === 201, `HTTP ${r.status} ${JSON.stringify(r.body)}`);
+    assert(r.body.refund.refundNo === `R-${cashSale.receiptNo}-1`, `refund no ${r.body.refund.refundNo}`);
+    assert(r.body.refund.totalCents === 277, `refund ${r.body.refund.totalCents} (expected 277)`);
+    assert(r.body.sale.status === 'completed' && r.body.sale.refundState === 'partial', `state ${r.body.sale.refundState}`);
+    const over = await api.call('POST', `/api/sales/${cashSale.id}/refunds`, { token: mgr.token, body: { items: [{ lineNo: 1, qty: 2 }] } });
+    assert(over.status === 409, `over-refund HTTP ${over.status}`);
+    const p = (await api.call('GET', '/api/products', { token: mgr.token })).body;
+    assert(p.find((x) => x.sku === 'COF-001').stock === 8, 'coffee not restocked by exactly 1');
+    const rc = await api.call('GET', `/api/sales/${cashSale.id}/receipt`, { token: mgr.token });
+    assert(rc.body.refunds?.length === 1 && rc.body.refundedCents === 277, 'receipt does not show the refund');
+    return `refund ${r.body.refund.refundNo}: 277 cents`;
+  });
+
   await suite.check('refund restocks and cannot be repeated', async () => {
     const r = await api.call('POST', `/api/sales/${cashSale.id}/refund`, { token: mgr.token });
     assert(r.status === 200 && r.body.status === 'refunded', `HTTP ${r.status}`);
+    const refunded = (r.body.refunds || []).reduce((t, x) => t + x.totalCents, 0);
+    assert(refunded === cashSale.totalCents, `refunds add up to ${refunded}, sale was ${cashSale.totalCents}`);
     const again = await api.call('POST', `/api/sales/${cashSale.id}/refund`, { token: mgr.token });
     assert(again.status === 409, `second refund HTTP ${again.status}`);
     const p = (await api.call('GET', '/api/products', { token: mgr.token })).body;
@@ -136,6 +156,60 @@ try {
     const list = await api.call('GET', '/api/products', { token: other.token });
     const sale = await api.call('GET', `/api/sales/${cashSale.id}`, { token: other.token });
     assert(list.body.length === 0 && sale.status === 404, `products ${list.body.length}, sale HTTP ${sale.status}`);
+  });
+  // ---- v2.2 store management ------------------------------------------------
+  let v22 = {};
+  await suite.check('Excel import: preview, then add products in one transaction (v2.2)', async () => {
+    const rows = [
+      { sku: 'SAN-100', name: 'Ham sandwich', category: 'Food', priceCents: 650, taxRateBp: 1300, stock: 5 },
+      { sku: 'MUG-100', name: 'eURC mug', category: 'Merch', priceCents: 1200, taxRateBp: 1300, stock: 5 },
+    ];
+    const dry = await api.call('POST', '/api/products/import', { token: mgr.token, body: { rows, dryRun: true } });
+    assert(dry.status === 200 && dry.body.created === 2, `dry run HTTP ${dry.status} ${JSON.stringify(dry.body)}`);
+    const bad = await api.call('POST', '/api/products/import', { token: mgr.token, body: { rows: [...rows, { sku: 'X', name: '', priceCents: -1 }] } });
+    assert(bad.status === 400 && bad.body.errors.length === 1, `bad file HTTP ${bad.status}`);
+    const r = await api.call('POST', '/api/products/import', { token: mgr.token, body: { rows } });
+    assert(r.status === 200 && r.body.created === 2, `import HTTP ${r.status}`);
+    const list = (await api.call('GET', '/api/products', { token: mgr.token })).body;
+    v22 = Object.fromEntries(list.map((x) => [x.sku, x]));
+    assert(v22['SAN-100'].refundable === false && v22['MUG-100'].refundable === true, 'Food should default to final sale');
+  });
+
+  await suite.check('batch price change by category with preview (v2.2)', async () => {
+    const pre = await api.call('POST', '/api/products/bulk-update', { token: mgr.token, body: { category: 'Merch', price: { mode: 'percent', value: 1000 }, dryRun: true } });
+    assert(pre.status === 200 && pre.body.changes[0].after.priceCents === 1320, `preview ${JSON.stringify(pre.body)}`);
+    const r = await api.call('POST', '/api/products/bulk-update', { token: mgr.token, body: { category: 'Merch', price: { mode: 'percent', value: 1000 } } });
+    assert(r.status === 200, `HTTP ${r.status}`);
+    const mug = (await api.call('GET', '/api/products', { token: mgr.token })).body.find((x) => x.sku === 'MUG-100');
+    assert(mug.priceCents === 1320, `mug ${mug.priceCents}`);
+  });
+
+  let v22sale;
+  await suite.check('promotion applied at checkout, tax on the discounted price (v2.2)', async () => {
+    const p = await api.call('POST', '/api/promotions', { token: mgr.token, body: { name: 'CI mug 25%', kind: 'percent', value: 2500, target: 'skus', skus: ['MUG-100'] } });
+    assert(p.status === 201, `HTTP ${p.status}`);
+    const r = await api.call('POST', '/api/sales', {
+      token: cashier.token,
+      body: { items: [{ productId: v22['MUG-100'].id, qty: 1 }, { productId: v22['SAN-100'].id, qty: 1 }], payment: { method: 'card', reference: 'AUTH-2200' } },
+    });
+    assert(r.status === 201, `sale HTTP ${r.status}`);
+    v22sale = r.body.sale;
+    // mug 13.20 - 25 % = 9.90 (+1.29 HST); sandwich 6.50 (+0.85)
+    assert(v22sale.discountCents === 330 && v22sale.totalCents === 1854, `discount ${v22sale.discountCents} total ${v22sale.totalCents}`);
+    await api.call('PATCH', `/api/promotions/${p.body.id}`, { token: mgr.token, body: { active: false } });
+    return `saved 330 cents, total 1854`;
+  });
+
+  await suite.check('refund policy: final sale refused, manager override recorded (v2.2)', async () => {
+    const no = await api.call('POST', `/api/sales/${v22sale.id}/refunds`, { token: mgr.token, body: { items: [{ lineNo: 2, qty: 1 }] } });
+    assert(no.status === 409, `final-sale refund HTTP ${no.status}`);
+    const yes = await api.call('POST', `/api/sales/${v22sale.id}/refunds`, {
+      token: mgr.token,
+      body: { items: [{ lineNo: 2, qty: 1 }], override: true, reason: 'integration test override' },
+    });
+    assert(yes.status === 201 && yes.body.refund.policyOverride === true, `override HTTP ${yes.status}`);
+    const mug = await api.call('POST', `/api/sales/${v22sale.id}/refunds`, { token: mgr.token, body: { items: [{ lineNo: 1, qty: 1 }] } });
+    assert(mug.status === 201 && mug.body.refund.totalCents === 1119, `mug refund ${mug.body?.refund?.totalCents} (expected the paid 9.90 + 1.29)`);
   });
 } finally {
   for (const s of [mgr, other]) {

@@ -13,12 +13,23 @@ export default function Receipt({ receipt, onClose, closeLabel = 'New sale', ext
             Cashier: {receipt.cashier}
           </p>
           {receipt.status === 'refunded' && <p className="stamp">REFUNDED</p>}
+          {receipt.status !== 'refunded' && receipt.refundState === 'partial' && <p className="stamp partial">PARTLY REFUNDED</p>}
           <table>
             <tbody>
               {receipt.lines.map((l) => (
-                <tr key={l.sku}>
+                <tr key={l.lineNo ?? l.sku}>
                   <td>
                     {l.qty} × {l.name}
+                    {l.refundable === false && <span title="Final sale"> *</span>}
+                    {l.discountCents > 0 && (
+                      <small className="line-promo">
+                        <br />
+                        {l.promotionName} −{formatMoney(l.discountCents, c)}
+                      </small>
+                    )}
+                    {l.refundedQty > 0 && receipt.status !== 'refunded' && (
+                      <span className="refunded-note"> · {l.refundedQty === l.qty ? 'refunded' : `${l.refundedQty} refunded`}</span>
+                    )}
                   </td>
                   <td className="num">{formatMoney(l.lineSubtotalCents, c)}</td>
                 </tr>
@@ -26,6 +37,14 @@ export default function Receipt({ receipt, onClose, closeLabel = 'New sale', ext
             </tbody>
           </table>
           <dl className="totals">
+            {receipt.discountCents > 0 && (
+              <>
+                <dt>You saved</dt>
+                <dd className="saving" data-testid="receipt-savings">
+                  {formatMoney(receipt.discountCents, c)}
+                </dd>
+              </>
+            )}
             <dt>Subtotal</dt>
             <dd>{formatMoney(receipt.subtotalCents, c)}</dd>
             <dt>Tax</dt>
@@ -46,6 +65,38 @@ export default function Receipt({ receipt, onClose, closeLabel = 'New sale', ext
               </>
             )}
           </dl>
+          {receipt.refunds?.length > 0 && (
+            <table className="refunds" aria-label="Refunds">
+              <tbody>
+                {receipt.refunds.map((r) => (
+                  <tr key={r.id}>
+                    <td>
+                      Refund {r.refundNo} · {new Date(r.createdAt).toLocaleString('en-CA')}
+                      <br />
+                      <small className="muted">
+                        {r.lines.map((l) => `${l.qty} × ${l.name}`).join(', ')}
+                        {r.reason ? ` — ${r.reason}` : ''}
+                      </small>
+                    </td>
+                    <td className="num">−{formatMoney(r.totalCents, c)}</td>
+                  </tr>
+                ))}
+                <tr>
+                  <td>
+                    <b>Net paid</b>
+                  </td>
+                  <td className="num" data-testid="receipt-net">
+                    <b>{formatMoney(receipt.totalCents - receipt.refundedCents, c)}</b>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          )}
+          {receipt.policy && (
+            <p className="muted center policy" data-testid="receipt-policy">
+              {receipt.policy}
+            </p>
+          )}
           <p className="muted center">Thank you!</p>
         </div>
         <div className="actions no-print">

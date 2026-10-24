@@ -62,6 +62,20 @@ function fakeApi() {
       const s = sales.find((x) => x.id === path.split('/')[3]);
       return json(200, { ...s, saleId: s.id, cashier: s.cashierName, store });
     }
+    if (/\/refunds$/.test(path)) {
+      const s = sales.find((x) => x.id === path.split('/')[3]);
+      const lines = body.items.map(({ lineNo, qty }) => {
+        const l = s.lines.find((x) => x.lineNo === lineNo);
+        l.refundedQty = (l.refundedQty || 0) + qty;
+        return { lineNo, sku: l.sku, name: l.name, qty, lineSubtotalCents: l.unitPriceCents * qty, lineTaxCents: 0 };
+      });
+      const total = lines.reduce((t, l) => t + l.lineSubtotalCents, 0);
+      const refund = { id: `r${(s.refunds || []).length + 1}`, refundNo: `R-${s.receiptNo}-1`, createdAt: new Date().toISOString(), lines, totalCents: total, reason: body.reason };
+      s.refunds = [...(s.refunds || []), refund];
+      s.refundedCents = (s.refundedCents || 0) + total;
+      s.refundState = 'partial';
+      return json(201, { sale: s, refund, receipt: { ...s, saleId: s.id, cashier: s.cashierName, store } });
+    }
     if (/\/refund$/.test(path)) {
       const s = sales.find((x) => x.id === path.split('/')[3]);
       s.status = 'refunded';
@@ -187,6 +201,36 @@ describe('<App> end-to-end against a fake API', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Sales' }));
     await userEvent.click(await screen.findByText('#1001'));
     await userEvent.click(await screen.findByRole('button', { name: 'Refund sale' }));
+    await vi.waitFor(() => expect(fake.sales[0].status).toBe('refunded'));
+  });
+
+  it('manager refunds one item, then the rest', async () => {
+    fake.sales.push({
+      id: 'x1', receiptNo: 1001, cashierName: 'Cal', createdAt: new Date().toISOString(),
+      lines: [
+        { lineNo: 1, sku: 'COF-001', name: 'Coffee', qty: 2, unitPriceCents: 245, taxRateBp: 0, lineSubtotalCents: 490, lineTaxCents: 0, refundedQty: 0 },
+        { lineNo: 2, sku: 'BAK-002', name: 'Muffin', qty: 1, unitPriceCents: 295, taxRateBp: 0, lineSubtotalCents: 295, lineTaxCents: 0, refundedQty: 0 },
+      ],
+      subtotalCents: 785, taxCents: 0, totalCents: 785, payment: { method: 'cash', tenderedCents: 800, changeCents: 15 },
+      status: 'completed', refundedCents: 0, refundState: 'none', refunds: [],
+    });
+    render(<App />);
+    await signIn('manager@demo.test');
+    await userEvent.click(await screen.findByRole('button', { name: 'Sales' }));
+    await userEvent.click(await screen.findByText('#1001'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Refund items' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Back' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Refund items' }));
+    const qty = screen.getByLabelText('Refund quantity for Coffee');
+    await userEvent.clear(qty);
+    await userEvent.type(qty, '1');
+    await userEvent.click(screen.getByRole('button', { name: 'Refund $2.45' }));
+
+    expect(await screen.findByText('PARTLY REFUNDED')).toBeInTheDocument();
+    expect(screen.getByText(/Refund R-1001-1/)).toBeInTheDocument();
+    expect(screen.getByTestId('receipt-net')).toHaveTextContent('$5.40');
+    expect(await screen.findByText('part refunded')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Refund the rest' }));
     await vi.waitFor(() => expect(fake.sales[0].status).toBe('refunded'));
   });
 
