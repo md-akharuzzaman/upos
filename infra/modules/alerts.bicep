@@ -47,7 +47,7 @@ var metricAlerts = [
   }
   {
     name: 'alert-eurc-healthcheck-${envShort}'
-    description: 'App Service health check below 100 % (instance failing /health)'
+    description: 'App Service health check below 100 % (instance failing /health/ready)'
     severity: 1
     scope: siteId
     ns: 'Microsoft.Web/sites'

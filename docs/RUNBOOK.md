@@ -155,6 +155,31 @@ Blob, Key Vault) and the release annotations on the charts.
 
 ---
 
+## Load a large catalogue (v2.3)
+
+For catalogues beyond a few thousand rows (e.g. the 200,000-product supermarket
+sample), import from Cloud Shell into a **separate demo store on test**:
+
+```bash
+# Excel: File > Save As > CSV UTF-8, then Manage files > Upload
+node scripts/40-bulk-import.mjs --env test --store supershop-demo \
+     --email you@example.com --file supershop-200k.csv --dry-run   # check every row first
+node scripts/40-bulk-import.mjs --env test --store supershop-demo \
+     --email you@example.com --file supershop-200k.csv             # import; re-run to resume
+```
+
+The script signs in as a user with *products.manage* (Admin, Manager or
+Procurement), creates missing categories, and sends batches of 1,000 through
+the API (each batch one transaction, bulk insert). On SQL Basic (5 DTU) expect
+roughly 30-60 minutes for 200,000 rows; scale the test database to S2 for the
+import and back afterwards to make it faster:
+
+```bash
+az sql db update -g rg-eurc-test-ncus -s <sql-server> -n sqldb-eurc-core-test --service-objective S2
+# ... import ...
+az sql db update -g rg-eurc-test-ncus -s <sql-server> -n sqldb-eurc-core-test --service-objective Basic
+```
+
 ## Screenshots worth taking
 
 * GitHub: CD run graph, a PR with the four checks and the CODEOWNERS review,

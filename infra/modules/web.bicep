@@ -37,9 +37,12 @@ func settings(environmentName string, slot string, location string, clientId str
   // The pipeline ships a ready-built package (node_modules included).
   { name: 'SCM_DO_BUILD_DURING_DEPLOYMENT', value: 'false' }
   { name: 'WEBSITE_RUN_FROM_PACKAGE', value: '1' }
-  // Slot swap warm-up: App Service waits for /health = 200 on the source slot
-  // before it switches traffic.
-  { name: 'WEBSITE_SWAP_WARMUP_PING_PATH', value: '/health' }
+  // Slot swap warm-up: App Service waits for /health/ready = 200 (app started,
+  // database schema current) on the source slot before it switches traffic.
+  // Not /health: its live dependency checks can be slow on a cold restart and
+  // made a swap time out (CD #3, v2.2.0); the smoke test and the post-deploy
+  // gate still check every dependency through /health.
+  { name: 'WEBSITE_SWAP_WARMUP_PING_PATH', value: '/health/ready' }
   { name: 'WEBSITE_SWAP_WARMUP_PING_STATUSES', value: '200' }
 ]
 
@@ -60,7 +63,9 @@ var siteConfig = {
   minTlsVersion: '1.2'
   scmMinTlsVersion: '1.2'
   http20Enabled: true
-  healthCheckPath: '/health'
+  // Platform health check (replaces failing instances): instance readiness only,
+  // so a shared dependency blip does not take every instance out at once.
+  healthCheckPath: '/health/ready'
   use32BitWorkerProcess: false
 }
 
