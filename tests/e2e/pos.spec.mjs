@@ -55,7 +55,7 @@ test.describe('eURC POS', () => {
       await form.getByLabel('Tax %').fill(tax);
       await form.getByLabel('Stock').fill(stock);
       await form.getByRole('button', { name: 'Add product' }).click();
-      await expect(page.getByRole('cell', { name: sku })).toBeVisible();
+      await expect(page.getByRole('cell', { name: sku, exact: true })).toBeVisible();
     }
 
     await page.getByRole('button', { name: 'Staff' }).click();
@@ -131,5 +131,32 @@ test.describe('eURC POS', () => {
     await page.getByRole('button', { name: 'Report' }).click();
     await expect(page.getByTestId('report-refunds')).toHaveText('2');
     await expect(page.getByTestId('report-net')).toHaveText('$2.77'); // only the card sale is left
+  });
+
+  test('manager runs a promotion and the register applies it (v2.2)', async ({ page }) => {
+    await page.goto('/');
+    await page.getByLabel('Store code').fill(slug);
+    await page.getByLabel('E-mail').fill(`erin@${slug}.test`);
+    await page.getByLabel('Password').fill(PASSWORD);
+    await page.getByRole('button', { name: 'Sign in' }).last().click();
+
+    await page.getByRole('button', { name: 'Promotions' }).click();
+    await page.getByLabel('Name', { exact: true }).fill('E2E coffee half price');
+    await page.getByLabel('Percent', { exact: true }).fill('50');
+    await page.getByLabel('Applies to').selectOption('skus');
+    await page.getByLabel('SKUs', { exact: true }).fill('COF-001');
+    await page.getByRole('button', { name: 'Create promotion' }).click();
+    await expect(page.getByText('running', { exact: true })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Register' }).click();
+    await page.getByRole('button', { name: 'Add Coffee, medium' }).click();
+    // 2.45 - 50 % (1.23) = 1.22, HST 13 % = 0.16
+    await expect(page.getByTestId('cart-savings')).toHaveText('−$1.23');
+    await expect(page.getByTestId('cart-total')).toHaveText('$1.38');
+    await page.getByRole('button', { name: /Charge/ }).click();
+    await page.getByLabel('Cash received').fill('2');
+    await page.getByRole('button', { name: 'Complete sale' }).click();
+    await expect(page.getByTestId('receipt-savings')).toHaveText('$1.23');
+    await expect(page.getByTestId('receipt-policy')).toContainText('Refunds within 30 days');
   });
 });
