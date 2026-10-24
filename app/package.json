@@ -1,6 +1,6 @@
 {
   "name": "eurc-pos-api",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "eURC Point of Sale API (Node.js / Express) - Hands-on Project 02",
   "main": "src/server.js",
   "scripts": {
@@ -27,5 +27,8 @@
   "private": true,
   "engines": {
     "node": ">=22 <23"
+  },
+  "overrides": {
+    "@azure/msal-node": "^7.1.1"
   }
 }
