@@ -1,0 +1,14 @@
+node_modules/
+dist/
+logs/
+reports/
+coverage/
+app/public/
+app/test-results.xml
+app/build.json
+web/test-results.xml
+tests/reports/
+tests/test-results/
+.github-values.env
+*.zip
+.DS_Store

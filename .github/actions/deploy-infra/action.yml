@@ -1,0 +1,91 @@
+name: Deploy infrastructure (Bicep)
+description: >
+  Runs what-if and deploys infra/main.bicep with the environment's parameter
+  file when infrastructure changed, when forced, or when the environment has
+  never been deployed. Always returns the deployment outputs (app name, URLs).
+
+inputs:
+  environment:
+    description: dev | test | prod
+    required: true
+  resource-group:
+    description: Target resource group
+    required: true
+  force:
+    description: Deploy even if infra/ did not change ('true' / 'false')
+    required: false
+    default: 'false'
+
+outputs:
+  web-app-name:
+    value: ${{ steps.out.outputs.web_app_name }}
+  web-app-url:
+    value: ${{ steps.out.outputs.web_app_url }}
+  staging-url:
+    value: ${{ steps.out.outputs.staging_url }}
+  app-insights-id:
+    value: ${{ steps.out.outputs.app_insights_id }}
+  log-analytics-id:
+    value: ${{ steps.out.outputs.log_analytics_id }}
+  deployed:
+    value: ${{ steps.decide.outputs.deploy }}
+
+runs:
+  using: composite
+  steps:
+    - name: Decide whether infrastructure must be deployed
+      id: decide
+      shell: bash
+      env:
+        RG: ${{ inputs.resource-group }}
+        FORCE: ${{ inputs.force }}
+      run: |
+        state=$(az deployment group show -g "$RG" -n eurc-main --query properties.provisioningState -o tsv 2>/dev/null || echo none)
+        if [[ "$FORCE" == "true" ]]; then reason="forced or infra/ changed"; deploy=true
+        elif [[ "$state" != "Succeeded" ]]; then reason="no successful deployment yet (state: $state)"; deploy=true
+        else reason="infra unchanged, last deployment Succeeded"; deploy=false; fi
+        echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+        echo "Infrastructure: deploy=$deploy ($reason)"
+        echo "**Infrastructure (${{ inputs.environment }}):** deploy=$deploy — $reason" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: What-if (preview of changes)
+      if: steps.decide.outputs.deploy == 'true'
+      shell: bash
+      env:
+        RG: ${{ inputs.resource-group }}
+        ENV_NAME: ${{ inputs.environment }}
+      run: |
+        az deployment group what-if -g "$RG" -n eurc-main \
+          -f infra/main.bicep -p "infra/env/${ENV_NAME}.bicepparam" \
+          --exclude-change-types Ignore NoChange --no-pretty-print -o json > whatif.json
+        jq -r '.changes[] | "\(.changeType)\t\(.resourceId | split("/providers/")[1])"' whatif.json | sort | tee whatif.txt
+        {
+          echo "<details><summary>What-if for ${ENV_NAME}: $(wc -l < whatif.txt) change(s)</summary>"
+          echo; echo '```'; head -c 60000 whatif.txt; echo '```'; echo "</details>"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Deploy Bicep
+      if: steps.decide.outputs.deploy == 'true'
+      shell: bash
+      env:
+        RG: ${{ inputs.resource-group }}
+        ENV_NAME: ${{ inputs.environment }}
+      run: |
+        az deployment group create -g "$RG" -n eurc-main \
+          -f infra/main.bicep -p "infra/env/${ENV_NAME}.bicepparam" \
+          --query properties.provisioningState -o tsv
+
+    - name: Read deployment outputs
+      id: out
+      shell: bash
+      env:
+        RG: ${{ inputs.resource-group }}
+      run: |
+        o=$(az deployment group show -g "$RG" -n eurc-main --query properties.outputs -o json)
+        {
+          echo "web_app_name=$(jq -r .webAppName.value <<<"$o")"
+          echo "web_app_url=$(jq -r .webAppUrl.value <<<"$o")"
+          echo "staging_url=$(jq -r .stagingUrl.value <<<"$o")"
+          echo "app_insights_id=$(jq -r .appInsightsId.value <<<"$o")"
+          echo "log_analytics_id=$(jq -r .logAnalyticsWorkspaceId.value <<<"$o")"
+        } | tee -a "$GITHUB_OUTPUT"

@@ -1,0 +1,31 @@
+{
+  "name": "eurc-pos-api",
+  "version": "2.0.0",
+  "description": "eURC Point of Sale API (Node.js / Express) - Hands-on Project 02",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "EURC_ENVIRONMENT=local EURC_SEED_DEMO=1 node --watch src/server.js",
+    "lint": "eslint .",
+    "test": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=test-results.xml \"test/**/*.test.js\"",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-include=\"src/**\" --test-coverage-exclude=\"src/adapters/azure.js\" --test-coverage-exclude=\"src/server.js\" --test-coverage-exclude=\"src/telemetry.js\" --test-coverage-exclude=\"src/seed.js\" \"test/**/*.test.js\""
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@azure/identity": "^4.14.0",
+    "@azure/keyvault-secrets": "^4.11.2",
+    "@azure/monitor-opentelemetry": "^1.20.1",
+    "@azure/storage-blob": "^12.34.0",
+    "express": "^5.3.0",
+    "mssql": "^12.7.11"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.13.0",
+    "globals": "^17.13.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=22 <23"
+  }
+}

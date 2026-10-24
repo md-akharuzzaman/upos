@@ -1,0 +1,268 @@
+# Continuous Delivery: build once, promote the SAME package dev -> test -> prod.
+#
+#   build ──► dev (auto) ──► test (auto) ──► [approval] prod: staging slot ─► swap ─► verify ──► release tag
+#                smoke          smoke             smoke on staging        post-deploy gate
+#                               integration                               auto-rollback on failure
+#                               load gate
+name: CD
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  workflow_dispatch:
+    inputs:
+      force_infra:
+        description: Re-deploy infrastructure (Bicep) in every environment
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: false   # never cancel a release half-way
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      infra_changed: ${{ steps.changes.outputs.infra }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            app/package-lock.json
+            web/package-lock.json
+
+      - name: API (Node.js) - install, lint, unit tests, coverage
+        working-directory: app
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run test:coverage
+
+      - name: Front end (React) - install, lint, component tests, production build
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run build
+
+      - name: Validate Bicep
+        env:
+          ALERT_EMAIL: ci@example.invalid
+        run: |
+          az bicep install
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          az bicep lint --file infra/main.bicep
+          for e in dev test prod; do az bicep build-params --file "infra/env/$e.bicepparam" --stdout > /dev/null; done
+
+      - name: Compute version
+        id: ver
+        run: |
+          base=$(jq -r .version app/package.json)
+          echo "version=${base}+${GITHUB_RUN_NUMBER}.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Did infrastructure change in this push?
+        id: changes
+        run: |
+          if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -qE '^infra/'; then echo "infra=true" >> "$GITHUB_OUTPUT"
+          else echo "infra=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Package (production dependencies + build.json)
+        working-directory: app
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          rm -rf node_modules public && npm ci --omit=dev --ignore-scripts
+          cp -r ../web/dist public          # React build, served by Express from the same App Service
+          jq -n --arg v "$VERSION" --arg c "${GITHUB_SHA::7}" --arg t "$(date -u +%FT%TZ)" \
+                --arg r "${GITHUB_RUN_ID}" --arg u "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+                '{version:$v, commit:$c, buildTime:$t, runId:$r, runUrl:$u}' > build.json
+          mkdir -p ../dist
+          zip -qr ../dist/eurc-app.zip src public node_modules package.json build.json
+          ls -lh ../dist/eurc-app.zip
+          echo "Built **$VERSION** ($(du -h ../dist/eurc-app.zip | cut -f1))" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: eurc-app
+          path: dist/eurc-app.zip
+          retention-days: 30
+
+  dev:
+    needs: build
+    uses: ./.github/workflows/_deploy-env.yml
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      environment: dev
+      version: ${{ needs.build.outputs.version }}
+      force-infra: ${{ inputs.force_infra == true || needs.build.outputs.infra_changed == 'true' }}
+
+  test:
+    needs: [build, dev]
+    uses: ./.github/workflows/_deploy-env.yml
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      environment: test
+      version: ${{ needs.build.outputs.version }}
+      force-infra: ${{ inputs.force_infra == true || needs.build.outputs.infra_changed == 'true' }}
+      run-integration: true
+      run-load: true
+      run-e2e: true
+
+  prod:
+    name: prod
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: prod            # QA sign-off: the tester (or the lead) must approve; whoever triggered the run cannot
+      url: ${{ steps.infra.outputs.web-app-url }}
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+      ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}   # read by infra/env/prod.bicepparam
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: eurc-app
+          path: dist
+
+      - name: Azure login (OIDC, prod identity)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Infrastructure
+        id: infra
+        uses: ./.github/actions/deploy-infra
+        with:
+          environment: prod
+          resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
+          force: ${{ inputs.force_infra == true || needs.build.outputs.infra_changed == 'true' }}
+
+      - name: Record version currently in production
+        id: before
+        run: |
+          v=$(curl -fsS --max-time 15 "${{ steps.infra.outputs.web-app-url }}/api/info" | jq -r .version || true)
+          echo "previous=${v:-none}" >> "$GITHUB_OUTPUT"
+          echo "Production before release: **${v:-none}**" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy to staging slot
+        if: steps.infra.outputs.staging-url != ''
+        env:
+          APP: ${{ steps.infra.outputs.web-app-name }}
+        run: |
+          az webapp deploy -g "$RG" -n "$APP" --slot staging --src-path dist/eurc-app.zip --type zip \
+            --async false --track-status false
+
+      - name: Smoke test staging slot
+        if: steps.infra.outputs.staging-url != ''
+        run: |
+          node tests/smoke.mjs --url "${{ steps.infra.outputs.staging-url }}" \
+            --expect-version "$VERSION" --expect-env prod --expect-slot staging \
+            --wait 600 --junit reports/smoke-prod-staging.xml
+
+      - name: Swap staging -> production (zero downtime)
+        id: swap
+        if: steps.infra.outputs.staging-url != ''
+        env:
+          APP: ${{ steps.infra.outputs.web-app-name }}
+        run: |
+          az webapp deployment slot swap -g "$RG" -n "$APP" --slot staging --target-slot production
+          echo "Swapped staging -> production at $(date -u +%T) UTC" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy directly to production (B1 fallback, no staging slot)
+        if: steps.infra.outputs.staging-url == ''
+        env:
+          APP: ${{ steps.infra.outputs.web-app-name }}
+        run: |
+          echo "::warning::No staging slot (B1 fallback): deploying straight to production, brief restart expected"
+          az webapp deploy -g "$RG" -n "$APP" --src-path dist/eurc-app.zip --type zip --async false --track-status false
+
+      - name: Verify production
+        run: |
+          node tests/smoke.mjs --url "${{ steps.infra.outputs.web-app-url }}" \
+            --expect-version "$VERSION" --expect-env prod --expect-slot production \
+            --wait 300 --junit reports/smoke-prod.xml
+
+      - name: Post-deployment gate (live traffic + Application Insights failure rate)
+        run: |
+          bash .github/scripts/post-deploy-gate.sh "${{ steps.infra.outputs.web-app-url }}" \
+            "${{ steps.infra.outputs.log-analytics-id }}" "$VERSION"
+
+      - name: Roll back (swap previous version back into production)
+        # Not on the very first release: the staging slot then holds no previous version.
+        if: failure() && steps.swap.outcome == 'success' && steps.before.outputs.previous != 'none'
+        env:
+          APP: ${{ steps.infra.outputs.web-app-name }}
+        run: |
+          echo "::error::Release $VERSION failed verification - rolling back to ${{ steps.before.outputs.previous }}"
+          az webapp deployment slot swap -g "$RG" -n "$APP" --slot staging --target-slot production
+          node tests/smoke.mjs --url "${{ steps.infra.outputs.web-app-url }}" \
+            --expect-env prod --expect-slot production --wait 300 --junit reports/smoke-prod-rollback.xml
+          echo "### :rewind: Rolled back to ${{ steps.before.outputs.previous }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Release annotation in Application Insights
+        if: success()
+        continue-on-error: true
+        env:
+          AI_ID: ${{ steps.infra.outputs.app-insights-id }}
+        run: |
+          props=$(jq -cn --arg v "$VERSION" --arg r "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+                  '{ReleaseName:$v, ReleaseDescription:"GitHub Actions CD", TriggerBy:"'"$GITHUB_ACTOR"'", ReleaseUrl:$r, Label:"Success"}')
+          body=$(jq -cn --arg id "$(cat /proc/sys/kernel/random/uuid)" --arg n "eURC $VERSION" \
+                  --arg t "$(date -u +%FT%T)" --arg p "$props" \
+                  '{Id:$id, AnnotationName:$n, EventTime:$t, Category:"Deployment", Properties:$p}')
+          az rest --method put --uri "${AI_ID}/Annotations?api-version=2015-05-01" --body "$body" -o none
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reports-prod
+          path: reports/
+          if-no-files-found: ignore
+
+  release:
+    name: release tag
+    needs: [build, prod]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          tag="v${VERSION//+/-}"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "eURC $VERSION" \
+            --notes "Promoted dev → test → prod by run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

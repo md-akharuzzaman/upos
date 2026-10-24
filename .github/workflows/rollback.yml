@@ -1,0 +1,71 @@
+# Manual production rollback: swaps the previous version (kept in the staging
+# slot after every release) back into production. Needs the same approval as
+# a release because it runs in the "prod" environment.
+name: Rollback production
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Why are we rolling back?
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment:
+      name: prod
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Find the production app
+        id: app
+        run: |
+          o=$(az deployment group show -g "$RG" -n eurc-main --query properties.outputs -o json)
+          {
+            echo "name=$(jq -r .webAppName.value <<<"$o")"
+            echo "url=$(jq -r .webAppUrl.value <<<"$o")"
+            echo "staging=$(jq -r .stagingUrl.value <<<"$o")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Show what will be swapped
+        env:
+          REASON: ${{ inputs.reason }}
+        run: |
+          prod=$(curl -fsS "${{ steps.app.outputs.url }}/api/info" | jq -r .version || echo unknown)
+          stag=$(curl -fsS "${{ steps.app.outputs.staging }}/api/info" | jq -r .version || echo unknown)
+          echo "production=$prod  staging(previous)=$stag"
+          {
+            echo "### Rollback requested by @${GITHUB_ACTOR}"
+            echo "Reason: ${REASON}"
+            echo; echo "| Slot | Version before |"; echo "|---|---|"
+            echo "| production | $prod |"; echo "| staging | $stag |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$stag" == "unknown" || "$stag" == "null" ]]; then
+            echo "::error::Staging slot has no healthy previous version to roll back to"; exit 1
+          fi
+
+      - name: Swap
+        run: az webapp deployment slot swap -g "$RG" -n "${{ steps.app.outputs.name }}" --slot staging --target-slot production
+
+      - name: Verify production after rollback
+        run: |
+          node tests/smoke.mjs --url "${{ steps.app.outputs.url }}" --expect-env prod --expect-slot production \
+            --wait 300 --junit reports/smoke-prod-rollback.xml

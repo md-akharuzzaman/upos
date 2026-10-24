@@ -1,0 +1,115 @@
+# Reusable: deploy the already-built package to one non-production environment
+# (dev or test), then run that environment's quality gates.
+name: deploy-env
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      force-infra:
+        type: boolean
+        default: false
+      run-integration:
+        type: boolean
+        default: false
+      run-load:
+        type: boolean
+        default: false
+      run-e2e:
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write   # OIDC token for azure/login (no client secret anywhere)
+  contents: read
+
+jobs:
+  deploy:
+    name: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.infra.outputs.web-app-url }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: eurc-app
+          path: dist
+
+      - name: Azure login (OIDC, ${{ inputs.environment }} identity)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Infrastructure
+        id: infra
+        uses: ./.github/actions/deploy-infra
+        with:
+          environment: ${{ inputs.environment }}
+          resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
+          force: ${{ inputs.force-infra }}
+
+      - name: Deploy application package
+        env:
+          RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+          APP: ${{ steps.infra.outputs.web-app-name }}
+        run: |
+          az webapp deploy -g "$RG" -n "$APP" --src-path dist/eurc-app.zip --type zip \
+            --async false --track-status false
+          echo "Deployed ${{ inputs.version }} to $APP" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test
+        run: |
+          node tests/smoke.mjs --url "${{ steps.infra.outputs.web-app-url }}" \
+            --expect-version "${{ inputs.version }}" --expect-env "${{ inputs.environment }}" \
+            --wait 600 --junit "reports/smoke-${{ inputs.environment }}.xml"
+
+      - name: Integration test (store trading day across SQL, Blob, Key Vault)
+        if: inputs.run-integration
+        run: |
+          node tests/integration.mjs --url "${{ steps.infra.outputs.web-app-url }}" \
+            --junit "reports/integration-${{ inputs.environment }}.xml"
+
+      - name: Load test gate (p95 < 1500 ms, errors < 1 %)
+        if: inputs.run-load
+        run: |
+          node tests/load.mjs --url "${{ steps.infra.outputs.web-app-url }}" \
+            --duration 60 --concurrency 10 --p95 1500 --max-error-rate 1 \
+            --junit "reports/load-${{ inputs.environment }}.xml"
+
+      - name: Browser end-to-end tests (Playwright, desktop + tablet)
+        if: inputs.run-e2e
+        working-directory: tests
+        env:
+          E2E_BASE_URL: ${{ steps.infra.outputs.web-app-url }}
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npx playwright test
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reports-${{ inputs.environment }}
+          path: |
+            reports/
+            tests/reports/
+          if-no-files-found: ignore

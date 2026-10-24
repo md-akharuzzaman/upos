@@ -1,0 +1,116 @@
+# Continuous Integration: runs on every pull request to main.
+# No Azure access is needed here; the same checks run again in the CD build job.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests (JUnit report)
+        run: npm test
+      - name: Coverage gate (80 % lines)
+        run: npm run test:coverage
+      - name: Dependency audit (production deps, high+)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-results
+          path: app/test-results.xml
+          if-no-files-found: ignore
+
+  web:
+    name: web
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Lint (ESLint + React hooks rules)
+        run: npm run lint
+      - name: Component tests (Vitest + Testing Library, JUnit report)
+        run: npm test
+      - name: Coverage gate (80 % lines)
+        run: npm run test:coverage
+      - name: Production build
+        run: npm run build
+      - name: Dependency audit (runtime deps, high+)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: component-test-results
+          path: web/test-results.xml
+          if-no-files-found: ignore
+
+  infra:
+    name: infra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Bicep build + lint
+        run: |
+          az bicep install
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          az bicep lint --file infra/main.bicep
+      - name: Build each environment's parameters
+        env:
+          ALERT_EMAIL: ci@example.invalid
+        run: |
+          for e in dev test prod; do
+            az bicep build-params --file "infra/env/$e.bicepparam" --stdout > /dev/null
+            echo "infra/env/$e.bicepparam OK"
+          done
+
+  scripts:
+    name: scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: ShellCheck
+        run: shellcheck --severity=warning scripts/*.sh .github/scripts/*.sh
+      - name: actionlint
+        run: |
+          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Test suites parse (smoke, integration, load, Playwright list)
+        run: |
+          for f in tests/*.mjs; do node --check "$f"; done
+          cd tests && npm ci && npx playwright test --list > /dev/null && echo "Playwright specs OK"

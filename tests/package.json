@@ -1,0 +1,17 @@
+{
+  "name": "eurc-pos-tests",
+  "version": "2.0.0",
+  "description": "eURC POS pipeline test suites - owned by the QA engineer (CODEOWNERS)",
+  "scripts": {
+    "smoke": "node smoke.mjs",
+    "integration": "node integration.mjs",
+    "load": "node load.mjs",
+    "e2e": "playwright test"
+  },
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@playwright/test": "^1.64.1"
+  },
+  "private": true,
+  "type": "module"
+}

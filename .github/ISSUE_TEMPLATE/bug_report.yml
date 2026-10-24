@@ -1,0 +1,42 @@
+name: Bug report
+description: Something in the POS does not work as expected
+labels: [bug]
+body:
+  - type: dropdown
+    id: env
+    attributes:
+      label: Environment
+      options: [dev, test, prod]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Shown in the header badge and footer (e.g. 2.0.0+42.abc1234)
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - S1 - sales cannot be taken (blocks release / consider rollback)
+        - S2 - wrong totals, stock or receipts
+        - S3 - workaround exists
+        - S4 - cosmetic
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Sign in as cashier\n2. Add 2 x Coffee\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual
+    validations:
+      required: true

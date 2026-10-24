@@ -1,0 +1,3 @@
+# Placeholder. scripts/02-setup-github.sh rewrites this file from config/eurc.env
+# (DEV1, DEV2, TESTER, GITHUB_OWNER) before the first push.
+*   @CHANGE-ME-developer-1 @CHANGE-ME-developer-2
