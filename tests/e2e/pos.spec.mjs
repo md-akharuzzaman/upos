@@ -105,7 +105,7 @@ test.describe('eURC POS', () => {
     await expect(page.getByText('AUTH-7731')).toBeVisible();
   });
 
-  test('manager sees the day in the report and can refund a sale', async ({ page }) => {
+  test('manager sees the day in the report, refunds one item, then the rest', async ({ page }) => {
     await page.goto('/');
     await page.getByLabel('Store code').fill(slug);
     await page.getByLabel('E-mail').fill(`erin@${slug}.test`);
@@ -118,7 +118,18 @@ test.describe('eURC POS', () => {
 
     await page.getByRole('button', { name: 'Sales' }).click();
     await page.getByRole('cell', { name: 'cash', exact: true }).click();
-    await page.getByRole('button', { name: 'Refund sale' }).click();
+    // v2.1: give back one coffee only ($2.45 + 32 ¢ HST)
+    await page.getByRole('button', { name: 'Refund items' }).click();
+    await page.getByLabel('Refund quantity for Coffee, medium').fill('1');
+    await expect(page.getByTestId('refund-total')).toHaveText('$2.77');
+    await page.getByRole('button', { name: 'Refund $2.77' }).click();
+    await expect(page.getByText('PARTLY REFUNDED')).toBeVisible();
+    await expect(page.getByTestId('receipt-net')).toHaveText('$5.72');
+    await page.getByRole('button', { name: 'Refund the rest' }).click();
     await expect(page.getByText('refunded', { exact: true })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Report' }).click();
+    await expect(page.getByTestId('report-refunds')).toHaveText('2');
+    await expect(page.getByTestId('report-net')).toHaveText('$2.77'); // only the card sale is left
   });
 });

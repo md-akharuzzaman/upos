@@ -6,6 +6,7 @@ const path = require('node:path');
 const express = require('express');
 const { MIGRATIONS } = require('./migrations');
 const { priceBasket, normaliseBasket, settlePayment } = require('./domain/pricing');
+const { withRefundTotals, planRefund } = require('./domain/refunds');
 const { hashPassword, verifyPassword, validatePassword, signToken, verifyToken } = require('./domain/auth');
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])$/;
@@ -81,14 +82,16 @@ function dayWindow(date, tz) {
   return { from: new Date(start).toISOString(), to: new Date(start + 86400000).toISOString() };
 }
 
-function buildReceipt(store, sale) {
+function buildReceipt(store, rawSale) {
+  const sale = withRefundTotals(rawSale);
   return {
     store: { name: store.name, slug: store.slug, currency: store.currency },
     receiptNo: sale.receiptNo,
     saleId: sale.id,
     createdAt: sale.createdAt,
     cashier: sale.cashierName,
-    lines: sale.lines.map(({ sku, name, qty, unitPriceCents, taxRateBp, lineSubtotalCents, lineTaxCents }) => ({
+    lines: sale.lines.map(({ lineNo, sku, name, qty, unitPriceCents, taxRateBp, lineSubtotalCents, lineTaxCents, refundedQty, refundedSubtotalCents, refundedTaxCents }) => ({
+      lineNo,
       sku,
       name,
       qty,
@@ -96,6 +99,9 @@ function buildReceipt(store, sale) {
       taxRateBp,
       lineSubtotalCents,
       lineTaxCents,
+      refundedQty,
+      refundedSubtotalCents,
+      refundedTaxCents,
     })),
     subtotalCents: sale.subtotalCents,
     taxCents: sale.taxCents,
@@ -103,33 +109,68 @@ function buildReceipt(store, sale) {
     payment: sale.payment,
     status: sale.status,
     refundedAt: sale.refundedAt,
+    refundState: sale.refundState,
+    refundedCents: sale.refundedCents,
+    refunds: sale.refunds.map(publicRefund),
   };
 }
 
-function summarise(sales) {
-  const done = sales.filter((s) => s.status === 'completed');
+const publicRefund = ({ id, refundNo, seq, createdAt, cashierName, method, reason, lines, subtotalCents, taxCents, totalCents }) => ({
+  id,
+  refundNo,
+  seq,
+  createdAt,
+  cashierName,
+  method,
+  reason,
+  lines: lines.map(({ lineNo, sku, name, qty, lineSubtotalCents, lineTaxCents }) => ({ lineNo, sku, name, qty, lineSubtotalCents, lineTaxCents })),
+  subtotalCents,
+  taxCents,
+  totalCents,
+});
+
+/**
+ * Daily report over the sales made on a day. Refunds are counted against the
+ * day of the original sale, so "net sales" for a day is what that day's sales
+ * are finally worth after any returns.
+ */
+function summarise(rawSales) {
+  const sales = rawSales.map(withRefundTotals);
   const byPayment = { cash: { count: 0, totalCents: 0 }, card: { count: 0, totalCents: 0 } };
   const products = new Map();
-  for (const s of done) {
+  let refundsCount = 0;
+  let refundedTax = 0;
+  let refundedSub = 0;
+  for (const s of sales) {
     byPayment[s.payment.method].count += 1;
-    byPayment[s.payment.method].totalCents += s.totalCents;
+    byPayment[s.payment.method].totalCents += s.totalCents - s.refundedCents;
+    refundsCount += s.refundState !== 'none' && s.refunds.length === 0 ? 1 : s.refunds.length; // v2.0 whole-sale refunds have no rows
     for (const l of s.lines) {
+      refundedTax += l.refundedTaxCents;
+      refundedSub += l.refundedSubtotalCents;
       const p = products.get(l.sku) || { sku: l.sku, name: l.name, qty: 0, revenueCents: 0 };
-      p.qty += l.qty;
-      p.revenueCents += l.lineSubtotalCents;
+      p.qty += l.qty - l.refundedQty;
+      p.revenueCents += l.lineSubtotalCents - l.refundedSubtotalCents;
       products.set(l.sku, p);
     }
   }
-  const sum = (k) => done.reduce((t, s) => t + s[k], 0);
+  const sum = (k) => sales.reduce((t, s) => t + s[k], 0);
+  const grossCents = sum('totalCents');
+  const refundedCents = sum('refundedCents');
   return {
-    salesCount: done.length,
-    refundsCount: sales.length - done.length,
-    grossCents: sum('totalCents'),
-    taxCents: sum('taxCents'),
-    netCents: sum('subtotalCents'),
-    averageSaleCents: done.length ? Math.round(sum('totalCents') / done.length) : 0,
+    salesCount: sales.length,
+    refundsCount,
+    grossCents,
+    refundedCents,
+    netSalesCents: grossCents - refundedCents,
+    taxCents: sum('taxCents') - refundedTax,
+    netCents: sum('subtotalCents') - refundedSub,
+    averageSaleCents: sales.length ? Math.round(grossCents / sales.length) : 0,
     byPayment,
-    topProducts: [...products.values()].sort((a, b) => b.qty - a.qty || b.revenueCents - a.revenueCents).slice(0, 5),
+    topProducts: [...products.values()]
+      .filter((p) => p.qty > 0)
+      .sort((a, b) => b.qty - a.qty || b.revenueCents - a.revenueCents)
+      .slice(0, 5),
   };
 }
 
@@ -393,33 +434,60 @@ function createApp({ config, db, blobs, secrets, state = { ready: true, schemaVe
   app.get('/api/sales', auth, async (req, res) => {
     const opts = { limit: Math.min(Number(req.query.limit) || 50, 200) };
     if (req.query.date) Object.assign(opts, dayWindow(req.query.date, req.query.tz));
-    res.json(await db.listSales(req.store.id, opts));
+    res.json((await db.listSales(req.store.id, opts)).map(withRefundTotals));
   });
 
   app.get('/api/sales/:id', auth, async (req, res) => {
     const s = await db.getSale(req.store.id, req.params.id);
     if (!s) throw new HttpError(404, 'sale not found');
-    res.json(s);
+    res.json(withRefundTotals(s));
   });
 
   app.get('/api/sales/:id/receipt', auth, async (req, res) => {
     const s = await db.getSale(req.store.id, req.params.id);
     if (!s) throw new HttpError(404, 'sale not found');
     const stored = await blobs.getJson(s.receiptBlob);
-    const receipt = stored ? { ...stored, status: s.status, refundedAt: s.refundedAt } : buildReceipt(req.store, s);
+    // SQL is the source of truth for refunds; the stored receipt keeps the
+    // original as printed (receipts written by v2.0 have no line numbers).
+    const live = buildReceipt(req.store, s);
+    const receipt = stored ? { ...stored, lines: live.lines, status: live.status, refundedAt: live.refundedAt, refundState: live.refundState, refundedCents: live.refundedCents, refunds: live.refunds } : live;
     res.json({ ...receipt, source: stored ? 'blob' : 'rebuilt' });
   });
 
-  app.post('/api/sales/:id/refund', auth, managerOnly, async (req, res) => {
+  async function refund(req, requested) {
+    const b = req.body || {};
+    const reason = b.reason === undefined || b.reason === '' ? null : str(b.reason, { min: 1, max: 200, name: 'reason' });
+    const meta = { id: crypto.randomUUID(), cashierId: req.user.id, cashierName: req.user.name, reason };
+    let out;
     try {
-      const s = await db.refundSale(req.store.id, req.params.id);
-      if (!s) throw new HttpError(404, 'sale not found');
-      await blobs.putJson(s.receiptBlob, buildReceipt(req.store, s)).catch(() => {});
-      res.json(s);
+      out = await db.recordRefund(req.store.id, req.params.id, meta, (sale) => planRefund(sale, requested));
     } catch (err) {
-      if (err.code === 'ALREADY_REFUNDED') throw new HttpError(409, 'sale is already refunded');
+      if (err.code === 'NOTHING_TO_REFUND' || err.code === 'OVER_REFUND') throw new HttpError(409, err.message);
       throw err;
     }
+    if (!out) throw new HttpError(404, 'sale not found');
+    const sale = withRefundTotals(out.sale);
+    const r = sale.refunds.find((x) => x.id === out.refund.id);
+    const receipt = buildReceipt(req.store, out.sale);
+    try {
+      await blobs.putJson(sale.receiptBlob.replace(/\.json$/, `-R${r.seq}.json`), { store: receipt.store, receiptNo: sale.receiptNo, saleId: sale.id, ...publicRefund(r) });
+      await blobs.putJson(sale.receiptBlob, receipt);
+    } catch (err) {
+      // The refund is committed; its receipt can always be rebuilt from SQL.
+      log.error?.(`[refund] blob write failed for ${sale.id}: ${err.message}`);
+    }
+    return { sale, refund: publicRefund(r), receipt };
+  }
+
+  // Refund chosen lines: { items: [{ lineNo, qty }], reason? }
+  app.post('/api/sales/:id/refunds', auth, managerOnly, async (req, res) => {
+    if (req.body?.items === undefined) throw bad('items is required: [{ lineNo, qty }]');
+    res.status(201).json(await refund(req, req.body.items));
+  });
+
+  // Refund everything not yet refunded (the v2.0 API, kept for compatibility).
+  app.post('/api/sales/:id/refund', auth, managerOnly, async (req, res) => {
+    res.json((await refund(req, undefined)).sale);
   });
 
   // ---- reports -----------------------------------------------------------

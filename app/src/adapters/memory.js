@@ -112,7 +112,7 @@ function createMemoryDb() {
       }
       for (const l of sale.lines) products.get(l.productId).stock -= l.qty;
       const receiptNo = [...sales.values()].filter((s) => s.storeId === storeId).reduce((m, s) => Math.max(m, s.receiptNo), 1000) + 1;
-      const row = { ...sale, storeId, receiptNo, status: 'completed', createdAt: new Date().toISOString(), refundedAt: null };
+      const row = { ...sale, storeId, receiptNo, status: 'completed', createdAt: new Date().toISOString(), refundedAt: null, refunds: [] };
       sales.set(sale.id, row);
       return clone(row);
     },
@@ -127,17 +127,36 @@ function createMemoryDb() {
         .slice(0, limit)
         .map(clone);
     },
-    async refundSale(storeId, id) {
-      const s = sales.get(id);
+    /**
+     * Records a refund atomically. plan(sale) validates and prices it (and
+     * throws to refuse); the adapter then stores it, restocks and, when the
+     * sale is now fully refunded, marks the sale 'refunded'.
+     */
+    async recordRefund(storeId, saleId, meta, plan) {
+      const s = sales.get(saleId);
       if (!s || s.storeId !== storeId) return null;
-      if (s.status === 'refunded') throw Object.assign(new Error('already refunded'), { code: 'ALREADY_REFUNDED' });
-      for (const l of s.lines) {
+      const draft = plan(clone(s));
+      const refund = {
+        ...meta,
+        saleId,
+        seq: s.refunds.length + 1,
+        method: s.payment.method,
+        lines: draft.lines,
+        subtotalCents: draft.subtotalCents,
+        taxCents: draft.taxCents,
+        totalCents: draft.totalCents,
+        createdAt: new Date().toISOString(),
+      };
+      for (const l of draft.lines) {
         const p = products.get(l.productId);
         if (p) p.stock += l.qty;
       }
-      s.status = 'refunded';
-      s.refundedAt = new Date().toISOString();
-      return clone(s);
+      s.refunds.push(refund);
+      if (draft.completesSale) {
+        s.status = 'refunded';
+        s.refundedAt = refund.createdAt;
+      }
+      return { sale: clone(s), refund: clone(refund) };
     },
   };
 }

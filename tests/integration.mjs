@@ -122,9 +122,29 @@ try {
     return `gross ${r.body.grossCents} cents, ${r.body.salesCount} sales`;
   });
 
+  await suite.check('item refund: one coffee back, stock and receipt updated (v2.1)', async () => {
+    const r = await api.call('POST', `/api/sales/${cashSale.id}/refunds`, {
+      token: mgr.token,
+      body: { items: [{ lineNo: 1, qty: 1 }], reason: 'integration test' },
+    });
+    assert(r.status === 201, `HTTP ${r.status} ${JSON.stringify(r.body)}`);
+    assert(r.body.refund.refundNo === `R-${cashSale.receiptNo}-1`, `refund no ${r.body.refund.refundNo}`);
+    assert(r.body.refund.totalCents === 277, `refund ${r.body.refund.totalCents} (expected 277)`);
+    assert(r.body.sale.status === 'completed' && r.body.sale.refundState === 'partial', `state ${r.body.sale.refundState}`);
+    const over = await api.call('POST', `/api/sales/${cashSale.id}/refunds`, { token: mgr.token, body: { items: [{ lineNo: 1, qty: 2 }] } });
+    assert(over.status === 409, `over-refund HTTP ${over.status}`);
+    const p = (await api.call('GET', '/api/products', { token: mgr.token })).body;
+    assert(p.find((x) => x.sku === 'COF-001').stock === 8, 'coffee not restocked by exactly 1');
+    const rc = await api.call('GET', `/api/sales/${cashSale.id}/receipt`, { token: mgr.token });
+    assert(rc.body.refunds?.length === 1 && rc.body.refundedCents === 277, 'receipt does not show the refund');
+    return `refund ${r.body.refund.refundNo}: 277 cents`;
+  });
+
   await suite.check('refund restocks and cannot be repeated', async () => {
     const r = await api.call('POST', `/api/sales/${cashSale.id}/refund`, { token: mgr.token });
     assert(r.status === 200 && r.body.status === 'refunded', `HTTP ${r.status}`);
+    const refunded = (r.body.refunds || []).reduce((t, x) => t + x.totalCents, 0);
+    assert(refunded === cashSale.totalCents, `refunds add up to ${refunded}, sale was ${cashSale.totalCents}`);
     const again = await api.call('POST', `/api/sales/${cashSale.id}/refund`, { token: mgr.token });
     assert(again.status === 409, `second refund HTTP ${again.status}`);
     const p = (await api.call('GET', '/api/products', { token: mgr.token })).body;

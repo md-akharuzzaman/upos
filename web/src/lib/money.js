@@ -37,3 +37,30 @@ export function quickTenders(totalCents) {
   for (const step of [500, 1000, 2000, 5000, 10000]) out.add(Math.ceil(totalCents / step) * step);
   return [...out].filter((v) => v >= totalCents).sort((a, b) => a - b).slice(0, 5);
 }
+
+/**
+ * Preview of an item refund, using the server's rule (app/src/domain/refunds.js):
+ * tax rounded half-up per line, and the last units of a line return exactly the
+ * tax still held for it. qty = { [lineNo]: number }.
+ */
+export function refundPreview(lines, qty) {
+  let subtotal = 0;
+  let tax = 0;
+  let items = 0;
+  for (const l of lines) {
+    const q = qty[l.lineNo] || 0;
+    if (q <= 0) continue;
+    const left = l.qty - (l.refundedQty || 0);
+    if (q === left) {
+      subtotal += l.lineSubtotalCents - (l.refundedSubtotalCents || 0);
+      tax += l.lineTaxCents - (l.refundedTaxCents || 0);
+    } else {
+      const s = l.unitPriceCents * q;
+      const raw = (s * l.taxRateBp) / 10000;
+      subtotal += s;
+      tax += Math.sign(raw) * Math.round(Math.abs(raw));
+    }
+    items += q;
+  }
+  return { subtotal, tax, total: subtotal + tax, items };
+}

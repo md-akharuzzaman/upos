@@ -17,6 +17,7 @@ function createCredential(cfg) {
 const iso = (d) => (d ? new Date(d).toISOString() : null);
 const lower = (g) => (g ? String(g).toLowerCase() : g);
 const dup = (what) => Object.assign(new Error(`${what} already exists`), { code: 'DUPLICATE' });
+const byProduct = (lines) => [...lines].sort((a, b) => (a.productId < b.productId ? -1 : a.productId > b.productId ? 1 : 0));
 const isDup = (err) => err && (err.number === 2627 || err.number === 2601);
 
 const mapStore = (r) => r && { id: lower(r.id), slug: r.slug, name: r.name, currency: r.currency, createdAt: iso(r.created_at) };
@@ -44,7 +45,7 @@ const mapProduct = (r) =>
     active: Boolean(r.active),
     updatedAt: iso(r.updated_at),
   };
-const mapSale = (r, lines = []) =>
+const mapSale = (r, lines = [], refunds = []) =>
   r && {
     id: lower(r.id),
     storeId: lower(r.store_id),
@@ -65,7 +66,31 @@ const mapSale = (r, lines = []) =>
     createdAt: iso(r.created_at),
     refundedAt: iso(r.refunded_at),
     lines,
+    refunds,
   };
+const mapRefund = (r, lines = []) => ({
+  id: lower(r.id),
+  saleId: lower(r.sale_id),
+  seq: r.seq,
+  cashierId: lower(r.cashier_id),
+  cashierName: r.cashier_name,
+  method: r.method,
+  reason: r.reason,
+  subtotalCents: r.subtotal_cents,
+  taxCents: r.tax_cents,
+  totalCents: r.total_cents,
+  createdAt: iso(r.created_at),
+  lines,
+});
+const mapRefundLine = (r) => ({
+  lineNo: r.line_no,
+  productId: lower(r.product_id),
+  sku: r.sku,
+  name: r.name,
+  qty: r.qty,
+  lineSubtotalCents: r.line_subtotal_cents,
+  lineTaxCents: r.line_tax_cents,
+});
 const mapLine = (r) => ({
   lineNo: r.line_no,
   productId: lower(r.product_id),
@@ -115,9 +140,10 @@ function createSqlDb(cfg, credential, log = console) {
     }
   }
 
-  async function linesFor(saleIds) {
+  // mk = request factory: the pool by default, or a transaction's requests.
+  async function linesFor(saleIds, mk = req) {
     if (saleIds.length === 0) return new Map();
-    const r = await req();
+    const r = await mk();
     const params = saleIds.map((id, i) => {
       r.input(`s${i}`, sql.UniqueIdentifier, id);
       return `@s${i}`;
@@ -128,6 +154,33 @@ function createSqlDb(cfg, credential, log = console) {
       const k = lower(row.sale_id);
       if (!m.has(k)) m.set(k, []);
       m.get(k).push(mapLine(row));
+    }
+    return m;
+  }
+
+  /** Refunds (with their lines) for a set of sales, keyed by sale id. */
+  async function refundsFor(saleIds, mk = req) {
+    if (saleIds.length === 0) return new Map();
+    const r = await mk();
+    const params = saleIds.map((id, i) => {
+      r.input(`s${i}`, sql.UniqueIdentifier, id);
+      return `@s${i}`;
+    });
+    const list = params.join(',');
+    const res = await r.query(`SELECT * FROM dbo.refunds WHERE sale_id IN (${list}) ORDER BY seq;
+      SELECT l.* FROM dbo.refund_lines l JOIN dbo.refunds f ON f.id = l.refund_id WHERE f.sale_id IN (${list}) ORDER BY l.line_no`);
+    const [heads, rows] = res.recordsets;
+    const byRefund = new Map();
+    for (const row of rows) {
+      const k = lower(row.refund_id);
+      if (!byRefund.has(k)) byRefund.set(k, []);
+      byRefund.get(k).push(mapRefundLine(row));
+    }
+    const m = new Map();
+    for (const h of heads) {
+      const k = lower(h.sale_id);
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(mapRefund(h, byRefund.get(lower(h.id)) || []));
     }
     return m;
   }
@@ -319,7 +372,9 @@ function createSqlDb(cfg, credential, log = console) {
     // ---- sales -------------------------------------------------------------
     async recordSale(storeId, sale) {
       const receiptNo = await inTransaction(async (r) => {
-        for (const l of sale.lines) {
+        // Touch product rows in one fixed order (by id) in sales and refunds
+        // alike, so two tills never lock the same products in opposite order.
+        for (const l of byProduct(sale.lines)) {
           const u = await r()
             .input('s', sql.UniqueIdentifier, storeId)
             .input('p', sql.UniqueIdentifier, l.productId)
@@ -378,8 +433,8 @@ function createSqlDb(cfg, credential, log = console) {
         .input('id', sql.UniqueIdentifier, id)
         .query('SELECT * FROM dbo.sales WHERE store_id = @s AND id = @id');
       if (!r.recordset[0]) return null;
-      const lines = await linesFor([id]);
-      return mapSale(r.recordset[0], lines.get(lower(id)) || []);
+      const [lines, refunds] = await Promise.all([linesFor([id]), refundsFor([id])]);
+      return mapSale(r.recordset[0], lines.get(lower(id)) || [], refunds.get(lower(id)) || []);
     },
     async listSales(storeId, { from, to, limit = 50 } = {}) {
       const r = await (await req())
@@ -388,27 +443,69 @@ function createSqlDb(cfg, credential, log = console) {
         .input('to', sql.DateTime2, to ? new Date(to) : new Date('9999-12-31'))
         .input('lim', sql.Int, Math.min(limit, 500))
         .query('SELECT TOP (@lim) * FROM dbo.sales WHERE store_id = @s AND created_at >= @from AND created_at < @to ORDER BY created_at DESC');
-      const lines = await linesFor(r.recordset.map((x) => x.id));
-      return r.recordset.map((x) => mapSale(x, lines.get(lower(x.id)) || []));
+      const ids = r.recordset.map((x) => x.id);
+      const [lines, refunds] = await Promise.all([linesFor(ids), refundsFor(ids)]);
+      return r.recordset.map((x) => mapSale(x, lines.get(lower(x.id)) || [], refunds.get(lower(x.id)) || []));
     },
-    async refundSale(storeId, id) {
-      const done = await inTransaction(async (r) => {
-        const u = await r()
+    /**
+     * Records a refund in one transaction. The sale row is locked first
+     * (UPDLOCK, HOLDLOCK), so two tills refunding the same receipt at once are
+     * serialised and the second sees the first one's refund before planning.
+     */
+    async recordRefund(storeId, saleId, meta, plan) {
+      const out = await inTransaction(async (r) => {
+        const head = await r()
           .input('s', sql.UniqueIdentifier, storeId)
-          .input('id', sql.UniqueIdentifier, id)
-          .query("UPDATE dbo.sales SET status = N'refunded', refunded_at = SYSUTCDATETIME() WHERE store_id = @s AND id = @id AND status = N'completed'");
-        if (u.rowsAffected[0] !== 1) return false;
+          .input('id', sql.UniqueIdentifier, saleId)
+          .query('SELECT * FROM dbo.sales WITH (UPDLOCK, HOLDLOCK) WHERE store_id = @s AND id = @id');
+        if (!head.recordset[0]) return null;
+        const [lines, refunds] = [await linesFor([saleId], r), await refundsFor([saleId], r)];
+        const sale = mapSale(head.recordset[0], lines.get(lower(saleId)) || [], refunds.get(lower(saleId)) || []);
+        const draft = plan(sale); // throws to refuse; the transaction rolls back
+        const seq = sale.refunds.length + 1;
         await r()
+          .input('id', sql.UniqueIdentifier, meta.id)
           .input('s', sql.UniqueIdentifier, storeId)
-          .input('id', sql.UniqueIdentifier, id)
-          .query(`UPDATE p SET p.stock = p.stock + l.qty FROM dbo.products p
-                  JOIN dbo.sale_lines l ON l.product_id = p.id WHERE l.sale_id = @id AND p.store_id = @s`);
+          .input('sid', sql.UniqueIdentifier, saleId)
+          .input('seq', sql.Int, seq)
+          .input('cid', sql.UniqueIdentifier, meta.cashierId)
+          .input('cn', sql.NVarChar(120), meta.cashierName)
+          .input('m', sql.NVarChar(10), sale.payment.method)
+          .input('why', sql.NVarChar(200), meta.reason ?? null)
+          .input('sub', sql.Int, draft.subtotalCents)
+          .input('tax', sql.Int, draft.taxCents)
+          .input('tot', sql.Int, draft.totalCents)
+          .query(`INSERT INTO dbo.refunds(id, store_id, sale_id, seq, cashier_id, cashier_name, method, reason, subtotal_cents, tax_cents, total_cents)
+                  VALUES (@id, @s, @sid, @seq, @cid, @cn, @m, @why, @sub, @tax, @tot)`);
+        for (const l of byProduct(draft.lines)) {
+          await r()
+            .input('rid', sql.UniqueIdentifier, meta.id)
+            .input('ln', sql.Int, l.lineNo)
+            .input('pid', sql.UniqueIdentifier, l.productId)
+            .input('sku', sql.NVarChar(40), l.sku)
+            .input('n', sql.NVarChar(120), l.name)
+            .input('q', sql.Int, l.qty)
+            .input('ls', sql.Int, l.lineSubtotalCents)
+            .input('lt', sql.Int, l.lineTaxCents)
+            .query(`INSERT INTO dbo.refund_lines(refund_id, line_no, product_id, sku, name, qty, line_subtotal_cents, line_tax_cents)
+                    VALUES (@rid, @ln, @pid, @sku, @n, @q, @ls, @lt)`);
+          await r()
+            .input('s', sql.UniqueIdentifier, storeId)
+            .input('p', sql.UniqueIdentifier, l.productId)
+            .input('q', sql.Int, l.qty)
+            .query('UPDATE dbo.products SET stock = stock + @q, updated_at = SYSUTCDATETIME() WHERE store_id = @s AND id = @p');
+        }
+        if (draft.completesSale) {
+          await r()
+            .input('s', sql.UniqueIdentifier, storeId)
+            .input('id', sql.UniqueIdentifier, saleId)
+            .query("UPDATE dbo.sales SET status = N'refunded', refunded_at = SYSUTCDATETIME() WHERE store_id = @s AND id = @id");
+        }
         return true;
       });
-      const sale = await this.getSale(storeId, id);
-      if (!sale) return null;
-      if (!done) throw Object.assign(new Error('already refunded'), { code: 'ALREADY_REFUNDED' });
-      return sale;
+      if (!out) return null;
+      const sale = await this.getSale(storeId, saleId);
+      return { sale, refund: sale.refunds.find((x) => x.id === lower(meta.id)) };
     },
   };
 }

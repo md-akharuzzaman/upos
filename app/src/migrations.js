@@ -105,6 +105,48 @@ CREATE TABLE dbo.sale_lines (
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_sales_store_created')
 CREATE INDEX ix_sales_store_created ON dbo.sales(store_id, created_at);`,
   },
+  {
+    // v2.1 item-level refunds. Expand only: two new tables, nothing changed on
+    // existing ones, so v2.0 still starts and runs against this schema. Caveat
+    // after a rollback to v2.0: it ignores these tables, so its "Refund sale"
+    // on a partly refunded receipt would restock the already-returned units
+    // again, and its report ignores part refunds. Avoid refunds until v2.1 is
+    // back, or re-deploy v2.1 (roll forward).
+    // store_id has no foreign key on purpose: refunds already cascade from
+    // sales, and SQL Server refuses a second cascade path from stores.
+    version: 4,
+    name: 'create_refunds',
+    sql: `
+IF OBJECT_ID(N'dbo.refunds', N'U') IS NULL
+CREATE TABLE dbo.refunds (
+  id              UNIQUEIDENTIFIER NOT NULL CONSTRAINT pk_refunds PRIMARY KEY,
+  store_id        UNIQUEIDENTIFIER NOT NULL,
+  sale_id         UNIQUEIDENTIFIER NOT NULL CONSTRAINT fk_refunds_sale REFERENCES dbo.sales(id) ON DELETE CASCADE,
+  seq             INT              NOT NULL,
+  cashier_id      UNIQUEIDENTIFIER NOT NULL,
+  cashier_name    NVARCHAR(120)    NOT NULL,
+  method          NVARCHAR(10)     NOT NULL,
+  reason          NVARCHAR(200)    NULL,
+  subtotal_cents  INT              NOT NULL,
+  tax_cents       INT              NOT NULL,
+  total_cents     INT              NOT NULL,
+  created_at      DATETIME2(3)     NOT NULL CONSTRAINT df_refunds_created DEFAULT SYSUTCDATETIME(),
+  CONSTRAINT uq_refunds_sale_seq UNIQUE (sale_id, seq),
+  CONSTRAINT ck_refunds_method CHECK (method IN (N'cash', N'card'))
+);
+IF OBJECT_ID(N'dbo.refund_lines', N'U') IS NULL
+CREATE TABLE dbo.refund_lines (
+  refund_id           UNIQUEIDENTIFIER NOT NULL CONSTRAINT fk_refund_lines_refund REFERENCES dbo.refunds(id) ON DELETE CASCADE,
+  line_no             INT              NOT NULL,
+  product_id          UNIQUEIDENTIFIER NOT NULL,
+  sku                 NVARCHAR(40)     NOT NULL,
+  name                NVARCHAR(120)    NOT NULL,
+  qty                 INT              NOT NULL CONSTRAINT ck_refund_lines_qty CHECK (qty > 0),
+  line_subtotal_cents INT              NOT NULL,
+  line_tax_cents      INT              NOT NULL,
+  CONSTRAINT pk_refund_lines PRIMARY KEY (refund_id, line_no)
+);`, // uq_refunds_sale_seq already indexes refunds by sale_id
+  },
 ];
 
 const BOOTSTRAP_SQL = `

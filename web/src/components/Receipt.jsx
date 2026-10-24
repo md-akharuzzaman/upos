@@ -13,12 +13,16 @@ export default function Receipt({ receipt, onClose, closeLabel = 'New sale', ext
             Cashier: {receipt.cashier}
           </p>
           {receipt.status === 'refunded' && <p className="stamp">REFUNDED</p>}
+          {receipt.status !== 'refunded' && receipt.refundState === 'partial' && <p className="stamp partial">PARTLY REFUNDED</p>}
           <table>
             <tbody>
               {receipt.lines.map((l) => (
-                <tr key={l.sku}>
+                <tr key={l.lineNo ?? l.sku}>
                   <td>
                     {l.qty} × {l.name}
+                    {l.refundedQty > 0 && receipt.status !== 'refunded' && (
+                      <span className="refunded-note"> · {l.refundedQty === l.qty ? 'refunded' : `${l.refundedQty} refunded`}</span>
+                    )}
                   </td>
                   <td className="num">{formatMoney(l.lineSubtotalCents, c)}</td>
                 </tr>
@@ -46,6 +50,33 @@ export default function Receipt({ receipt, onClose, closeLabel = 'New sale', ext
               </>
             )}
           </dl>
+          {receipt.refunds?.length > 0 && (
+            <table className="refunds" aria-label="Refunds">
+              <tbody>
+                {receipt.refunds.map((r) => (
+                  <tr key={r.id}>
+                    <td>
+                      Refund {r.refundNo} · {new Date(r.createdAt).toLocaleString('en-CA')}
+                      <br />
+                      <small className="muted">
+                        {r.lines.map((l) => `${l.qty} × ${l.name}`).join(', ')}
+                        {r.reason ? ` — ${r.reason}` : ''}
+                      </small>
+                    </td>
+                    <td className="num">−{formatMoney(r.totalCents, c)}</td>
+                  </tr>
+                ))}
+                <tr>
+                  <td>
+                    <b>Net paid</b>
+                  </td>
+                  <td className="num" data-testid="receipt-net">
+                    <b>{formatMoney(receipt.totalCents - receipt.refundedCents, c)}</b>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          )}
           <p className="muted center">Thank you!</p>
         </div>
         <div className="actions no-print">

@@ -2,12 +2,14 @@ import { useCallback, useState } from 'react';
 import { api } from '../api.js';
 import { formatMoney } from '../lib/money.js';
 import Receipt from './Receipt.jsx';
+import RefundItems from './RefundItems.jsx';
 import { useLoader } from '../lib/useLoader.js';
 import { today, tz } from '../lib/dates.js';
 
 export default function Sales({ token, currency, isManager, onAuthError }) {
   const [date, setDate] = useState(today());
   const [open, setOpen] = useState(null);
+  const [refunding, setRefunding] = useState(false);
   const [error, setError] = useState('');
 
   const fetchRows = useCallback(() => api(`/api/sales?date=${date}&tz=${tz()}&limit=200`, { token }), [date, token]);
@@ -72,21 +74,44 @@ export default function Sales({ token, currency, isManager, onAuthError }) {
               <td>{s.lines.reduce((n, l) => n + l.qty, 0)}</td>
               <td>{s.payment.method}</td>
               <td className="num">{formatMoney(s.totalCents, currency)}</td>
-              <td>{s.status === 'refunded' ? <span className="badge red">refunded</span> : <span className="badge green">paid</span>}</td>
+              <td>
+                {s.status === 'refunded' ? (
+                  <span className="badge red">refunded</span>
+                ) : s.refundedCents > 0 ? (
+                  <span className="badge amber">part refunded</span>
+                ) : (
+                  <span className="badge green">paid</span>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
-      {open && (
+      {open && refunding && (
+        <RefundItems
+          receipt={open}
+          token={token}
+          onCancel={() => setRefunding(false)}
+          onDone={(out) => {
+            setRefunding(false);
+            setOpen({ ...out.receipt, source: 'live' });
+            load();
+          }}
+        />
+      )}
+      {open && !refunding && (
         <Receipt
           receipt={open}
           closeLabel="Close"
           onClose={() => setOpen(null)}
           extra={
             isManager && open.status === 'completed' ? (
-              <button className="danger" onClick={refund}>
-                Refund sale
-              </button>
+              <>
+                {open.lines.every((l) => l.lineNo) && <button onClick={() => setRefunding(true)}>Refund items</button>}
+                <button className="danger" onClick={refund}>
+                  {open.refundedCents > 0 ? 'Refund the rest' : 'Refund sale'}
+                </button>
+              </>
             ) : null
           }
         />

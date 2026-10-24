@@ -104,3 +104,15 @@ tr.clickable { cursor: pointer; } tr.clickable:hover td { background: var(--bg);
   body * { visibility: hidden; } .printable, .printable * { visibility: visible; }
   .printable { position: absolute; left: 0; top: 0; width: 80mm; } .overlay { background: none; } .no-print { display: none; }
 }
+
+/* v2.1 item refunds */
+.badge.amber { background: #fff4e5; color: #8a4b00; }
+.stamp.partial { color: #8a4b00; border-color: #8a4b00; }
+.refund table { width: 100%; border-collapse: collapse; }
+.refund th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 4px 0; }
+.refund td { padding: 6px 0; border-bottom: 1px dashed var(--line); vertical-align: middle; }
+.refund td small { display: block; color: var(--muted); font-size: 12px; }
+.refund input[type='number'] { width: 64px; text-align: right; }
+.refund .num, .refunds .num { text-align: right; }
+.receipt .refunds { margin: 4px 0; font-size: 14px; }
+.receipt .refunded-note { color: #8a4b00; font-size: 12px; }
