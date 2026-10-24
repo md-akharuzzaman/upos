@@ -1,6 +1,6 @@
 {
   "name": "eurc-pos-web",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "private": true,
   "description": "eURC Point of Sale front end (React + Vite) - Hands-on Project 02",
   "type": "module",

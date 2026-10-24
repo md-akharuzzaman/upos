@@ -191,8 +191,12 @@ function createSqlDb(cfg, credential, log = console) {
         // seconds, and with min 0 / 30 s idle every quiet spell meant paying
         // that again (v2.3.1 test runs: 5-15 s sign-ins). TCP keep-alive keeps
         // the idle connections alive through the SQL gateway.
-        pool: { max: 10, min: 2, idleTimeoutMillis: 600000 },
-        connectionTimeout: 30000,
+        // A new connection can occasionally hang (never connect, never fail).
+        // mssql's default pool then fails the request after 30 s with "operation
+        // timed out for an unknown reason" (CD #5 and #6 in test). Give each
+        // attempt 10 s and let the pool retry instead of failing the request.
+        pool: { max: 10, min: 2, idleTimeoutMillis: 600000, createTimeoutMillis: 10000, acquireTimeoutMillis: 25000, propagateCreateError: false },
+        connectionTimeout: 10000,
         requestTimeout: 30000,
       })
         .connect()
