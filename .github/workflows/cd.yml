@@ -196,8 +196,8 @@ jobs:
         env:
           APP: ${{ steps.infra.outputs.web-app-name }}
         run: |
-          az webapp deployment slot swap -g "$RG" -n "$APP" --slot staging --target-slot production
-          echo "Swapped staging -> production at $(date -u +%T) UTC" >> "$GITHUB_STEP_SUMMARY"
+          bash .github/scripts/swap-slots.sh "$RG" "$APP" "${{ steps.infra.outputs.staging-url }}" "$VERSION" reports/smoke-prod-preview.xml
+          echo "Swapped staging -> production at $(date -u +%T) UTC (swap with preview)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Deploy directly to production (B1 fallback, no staging slot)
         if: steps.infra.outputs.staging-url == ''
@@ -225,10 +225,16 @@ jobs:
           APP: ${{ steps.infra.outputs.web-app-name }}
         run: |
           echo "::error::Release $VERSION failed verification - rolling back to ${{ steps.before.outputs.previous }}"
-          az webapp deployment slot swap -g "$RG" -n "$APP" --slot staging --target-slot production
+          bash .github/scripts/swap-slots.sh "$RG" "$APP" "${{ steps.infra.outputs.staging-url }}" "${{ steps.before.outputs.previous }}" reports/smoke-rollback-preview.xml
           node tests/smoke.mjs --url "${{ steps.infra.outputs.web-app-url }}" \
             --expect-env prod --expect-slot production --wait 300 --junit reports/smoke-prod-rollback.xml
           echo "### :rewind: Rolled back to ${{ steps.before.outputs.previous }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cancel a half-finished swap (run cancelled during the preview)
+        if: cancelled() && steps.infra.outputs.staging-url != ''
+        env:
+          APP: ${{ steps.infra.outputs.web-app-name }}
+        run: az webapp deployment slot swap -g "$RG" -n "$APP" --slot staging --action reset -o none || true
 
       - name: Release annotation in Application Insights
         if: success()
