@@ -20,7 +20,9 @@ export function parseArgs(argv = process.argv.slice(2)) {
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function http(url, opts = {}, timeoutMs = 15000) {
+// 30 s = the API's own SQL request timeout, so a slow-but-working call is
+// reported by the load gate (p95) instead of failing a functional check.
+export async function http(url, opts = {}, timeoutMs = 30000) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
   const t0 = performance.now();
