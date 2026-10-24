@@ -1,6 +1,9 @@
 import { useCallback, useState } from 'react';
 import { api } from '../api.js';
 import { formatMoney } from '../lib/money.js';
+import { LONG_LABELS } from '../lib/payments.js';
+
+const ORDER = ['cash', 'debit', 'credit', 'card', 'etransfer', 'stripe'];
 import { today, tz } from '../lib/dates.js';
 import { useLoader } from '../lib/useLoader.js';
 
@@ -69,13 +72,16 @@ export default function Report({ token, currency, onAuthError }) {
                 </tr>
               </thead>
               <tbody>
-                {['cash', 'card'].map((m) => (
-                  <tr key={m}>
-                    <td>{m}</td>
-                    <td className="num">{r.byPayment[m].count}</td>
-                    <td className="num">{formatMoney(r.byPayment[m].totalCents, currency)}</td>
-                  </tr>
-                ))}
+                {Object.entries(r.byPayment)
+                  .filter(([m, x]) => x.count > 0 || m === 'cash')
+                  .sort(([a], [b]) => ORDER.indexOf(a) - ORDER.indexOf(b))
+                  .map(([m, x]) => (
+                    <tr key={m}>
+                      <td>{LONG_LABELS[m] || m}</td>
+                      <td className="num">{x.count}</td>
+                      <td className="num">{formatMoney(x.totalCents, currency)}</td>
+                    </tr>
+                  ))}
               </tbody>
             </table>
             <table className="card table">

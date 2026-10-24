@@ -20,6 +20,7 @@ const PERMISSIONS = {
   'categories.manage': ['admin', 'manager', 'procurement'],
   'promotions.manage': ['admin', 'manager', 'sales'],
   'reports.view': ['admin', 'manager', 'sales'],
+  'reports.tax': ['admin', 'manager'],
   'staff.manage': ['admin', 'manager'],
   'store.settings': ['admin', 'manager'],
   'business.profile': ['admin'],

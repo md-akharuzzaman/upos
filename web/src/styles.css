@@ -45,7 +45,7 @@ main { flex: 1; }
 .login-card { width: min(420px, 100%); padding: 24px; display: flex; flex-direction: column; gap: 12px; }
 .login-brand b { font-size: 28px; color: var(--navy); } .login-brand span { color: var(--muted); }
 .segmented { display: flex; background: var(--bg); border-radius: 10px; padding: 3px; gap: 3px; }
-.segmented button { flex: 1; border: none; background: none; }
+.segmented button { flex: 1; border: none; background: none; white-space: nowrap; padding-left: 6px; padding-right: 6px; }
 .segmented button[aria-selected="true"], .segmented button[aria-checked="true"] { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.12); font-weight: 600; }
 
 .register { display: grid; grid-template-columns: 1fr 360px; gap: 16px; padding: 16px 18px; align-items: start; }
@@ -162,3 +162,7 @@ label.check select, label.check input:not([type]) { width: auto; }
 .progress > span { display: block; height: 100%; background: var(--azure); transition: width .2s; }
 .receipt .biz { font-size: 12px; margin: 0; }
 .block { display: block; }
+/* v2.4 GST/HST report */
+.notes { padding: 14px; } .notes h3 { margin: 0 0 6px; font-size: 15px; color: var(--navy); } .notes ul { margin: 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+.notes li + li { margin-top: 4px; }
+.page > .table { width: 100%; }

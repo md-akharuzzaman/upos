@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { api } from '../api.js';
 import { formatMoney, refundPreview } from '../lib/money.js';
+import { refundInstruction } from '../lib/payments.js';
 
 // Manager-only: refund chosen items from a receipt. The server re-prices and
 // re-checks everything (including the store's refund policy); this screen
@@ -20,7 +21,6 @@ export default function RefundItems({ receipt, token, onCancel, onDone, now: now
   const policyBlocks = expired || receipt.lines.some((l) => l.refundable === false && left(l) > 0);
   const chosen = Object.fromEntries(Object.entries(qty).filter(([lineNo]) => allowed(receipt.lines.find((l) => l.lineNo === Number(lineNo)))));
   const t = refundPreview(receipt.lines, chosen);
-  const cash = receipt.payment.method === 'cash';
   const reasonOk = !override || reason.trim().length >= 5;
 
   const set = (lineNo, v, max) => {
@@ -121,11 +121,7 @@ export default function RefundItems({ receipt, token, onCancel, onDone, now: now
             {formatMoney(t.total, c)}
           </dd>
         </dl>
-        <p className="hint">
-          {cash
-            ? 'Give the customer this amount in cash from the drawer.'
-            : `Reverse this amount on the card terminal (original approval ${receipt.payment.cardReference}).`}
-        </p>
+        <p className="hint">{refundInstruction(receipt.payment)}</p>
         {error && (
           <p className="error" role="alert">
             {error}
