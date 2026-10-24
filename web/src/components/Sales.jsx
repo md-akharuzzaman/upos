@@ -6,7 +6,7 @@ import RefundItems from './RefundItems.jsx';
 import { useLoader } from '../lib/useLoader.js';
 import { today, tz } from '../lib/dates.js';
 
-export default function Sales({ token, currency, isManager, onAuthError }) {
+export default function Sales({ token, currency, canRefund = false, canOverride = false, onAuthError }) {
   const [date, setDate] = useState(today());
   const [open, setOpen] = useState(null);
   const [refunding, setRefunding] = useState(false);
@@ -91,6 +91,7 @@ export default function Sales({ token, currency, isManager, onAuthError }) {
         <RefundItems
           receipt={open}
           token={token}
+          canOverride={canOverride}
           onCancel={() => setRefunding(false)}
           onDone={(out) => {
             setRefunding(false);
@@ -105,7 +106,7 @@ export default function Sales({ token, currency, isManager, onAuthError }) {
           closeLabel="Close"
           onClose={() => setOpen(null)}
           extra={
-            isManager && open.status === 'completed' ? (
+            canRefund && open.status === 'completed' ? (
               <>
                 {open.lines.every((l) => l.lineNo) && <button onClick={() => setRefunding(true)}>Refund items</button>}
                 <button className="danger" onClick={refund}>

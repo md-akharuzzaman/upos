@@ -44,8 +44,28 @@ describe('excel helpers', () => {
       ['B-2', 'Tea'],
     ]);
     const sheet = productsToSheet(products);
-    expect(sheet[0].map((c) => c.value)).toEqual(['SKU', 'Name', 'Category', 'Price', 'Tax %', 'Stock', 'Refundable', 'Active']);
-    expect(sheet[2].map((c) => c.value)).toEqual(['SAN-001', 'Sandwich', 'Food', 6, 13, 4, 'No', 'Yes']);
+    expect(sheet[0].map((c) => c.value)).toEqual([
+      'SKU',
+      'Barcode',
+      'Name',
+      'Category',
+      'Sub-category',
+      'Price',
+      'Tax %',
+      'Stock',
+      'Expiry date',
+      'Refundable',
+      'Active',
+    ]);
+    expect(sheet[2].map((c) => c.value)).toEqual(['SAN-001', '', 'Sandwich', 'Food', '', 6, 13, 4, '', 'No', 'Yes']);
+    // v2.3 columns round-trip through the import mapping
+    const back = rowsToProducts([
+      ['SKU', 'Barcode', 'Name', 'Sub-category', 'Expiry date'],
+      ['A-1', '4006381333931', 'Milk', 'Dairy', '2026-11-30'],
+      ['A-2', '', 'Bad date', '', '30/11/2026'],
+    ]);
+    expect(back.rows[0]).toEqual({ sku: 'A-1', barcode: '4006381333931', name: 'Milk', subcategory: 'Dairy', expiresOn: '2026-11-30' });
+    expect(back.problems).toEqual(['Row 3: expiry date "30/11/2026" must be YYYY-MM-DD.']);
     expect(productsToSheet([])).toHaveLength(3); // headings + 2 example rows
   });
 });
@@ -58,11 +78,33 @@ describe('<ImportProducts>', () => {
       vi.fn(async (url, opts) => {
         const body = JSON.parse(opts.body);
         calls.push(body);
-        if (body.rows.some((r) => r.sku === 'BAD')) return json(400, { error: '1 row(s) need fixing', created: 1, updated: 0, unchanged: 0, rows: [], errors: [{ row: 3, sku: 'BAD', error: 'name must be 1-120 characters' }] });
-        return json(200, { dryRun: Boolean(body.dryRun), created: 1, updated: 1, unchanged: 0, errors: [], rows: [{ row: 2, sku: 'NEW-1', action: 'create', name: 'New', changed: [] }, { row: 3, sku: 'COF-001', action: 'update', name: 'Coffee', changed: ['priceCents'] }] });
+        if (body.rows.some((r) => r.sku === 'BAD'))
+          return json(400, {
+            error: '1 row(s) need fixing',
+            created: 1,
+            updated: 0,
+            unchanged: 0,
+            rows: [],
+            errors: [{ row: 3, sku: 'BAD', error: 'name must be 1-120 characters' }],
+          });
+        return json(200, {
+          dryRun: Boolean(body.dryRun),
+          created: 1,
+          updated: 1,
+          unchanged: 0,
+          errors: [],
+          rows: [
+            { row: 2, sku: 'NEW-1', action: 'create', name: 'New', changed: [] },
+            { row: 3, sku: 'COF-001', action: 'update', name: 'Coffee', changed: ['priceCents'] },
+          ],
+        });
       }),
     );
-    let sheet = [['SKU', 'Name', 'Price'], ['NEW-1', 'New', 1], ['BAD', '', 1]];
+    let sheet = [
+      ['SKU', 'Name', 'Price'],
+      ['NEW-1', 'New', 1],
+      ['BAD', '', 1],
+    ];
     const onImported = vi.fn();
     render(<ImportProducts token="t" onClose={vi.fn()} onImported={onImported} read={async () => sheet} />);
     const file = () => new File(['x'], 'products.xlsx');
@@ -70,7 +112,11 @@ describe('<ImportProducts>', () => {
     expect(await screen.findByText('name must be 1-120 characters')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Import/ })).toBeDisabled();
 
-    sheet = [['SKU', 'Name', 'Price'], ['NEW-1', 'New', 1], ['COF-001', 'Coffee', 4]];
+    sheet = [
+      ['SKU', 'Name', 'Price'],
+      ['NEW-1', 'New', 1],
+      ['COF-001', 'Coffee', 4],
+    ];
     await userEvent.upload(screen.getByLabelText('Excel or CSV file'), file());
     expect(await screen.findByText('update priceCents')).toBeInTheDocument();
     expect(screen.getByTestId('import-summary')).toHaveTextContent('1 new · 1 updated · 0 unchanged');
@@ -95,7 +141,11 @@ describe('<BulkPriceTax>', () => {
       vi.fn(async (url, opts) => {
         const b = JSON.parse(opts.body);
         sent.push(b);
-        return json(200, { dryRun: b.dryRun, count: 1, changes: [{ id: 'p1', sku: 'COF-001', name: 'Coffee', before: { priceCents: 375, taxRateBp: 1300 }, after: { priceCents: 356, taxRateBp: 500 } }] });
+        return json(200, {
+          dryRun: b.dryRun,
+          count: 1,
+          changes: [{ id: 'p1', sku: 'COF-001', name: 'Coffee', before: { priceCents: 375, taxRateBp: 1300 }, after: { priceCents: 356, taxRateBp: 500 } }],
+        });
       }),
     );
     const onDone = vi.fn();
@@ -116,7 +166,10 @@ describe('<BulkPriceTax>', () => {
 
   it('category and "set price" modes; validation messages', async () => {
     const sent = [];
-    vi.stubGlobal('fetch', vi.fn(async (url, opts) => (sent.push(JSON.parse(opts.body)), json(200, { count: 1, changes: [] }))));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, opts) => (sent.push(JSON.parse(opts.body)), json(200, { count: 1, changes: [] }))),
+    );
     render(<BulkPriceTax token="t" products={products} currency="CAD" onClose={vi.fn()} />);
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Category' }), 'Food');
     await userEvent.click(screen.getByRole('button', { name: 'Preview' }));
@@ -138,8 +191,31 @@ describe('<BulkPriceTax>', () => {
 describe('<Promotions>', () => {
   it('lists promotions with their state and creates one for chosen SKUs with dates', async () => {
     const list = [
-      { id: 'a', name: 'Coffee week', kind: 'percent', value: 2000, target: 'skus', skus: ['COF-001'], startsAt: '2026-10-20T04:00:00Z', endsAt: null, active: true, state: 'running' },
-      { id: 'b', name: 'Bakery', kind: 'amount', value: 50, target: 'category', category: 'Food', skus: [], startsAt: '2026-11-01T04:00:00Z', endsAt: '2026-11-08T05:00:00Z', active: true, state: 'scheduled' },
+      {
+        id: 'a',
+        name: 'Coffee week',
+        kind: 'percent',
+        value: 2000,
+        target: 'skus',
+        skus: ['COF-001'],
+        startsAt: '2026-10-20T04:00:00Z',
+        endsAt: null,
+        active: true,
+        state: 'running',
+      },
+      {
+        id: 'b',
+        name: 'Bakery',
+        kind: 'amount',
+        value: 50,
+        target: 'category',
+        category: 'Food',
+        skus: [],
+        startsAt: '2026-11-01T04:00:00Z',
+        endsAt: '2026-11-08T05:00:00Z',
+        active: true,
+        state: 'scheduled',
+      },
     ];
     const posted = [];
     vi.stubGlobal(
@@ -147,6 +223,15 @@ describe('<Promotions>', () => {
       vi.fn(async (url, opts = {}) => {
         if (opts.method === 'POST') posted.push(JSON.parse(opts.body));
         if (opts.method === 'PATCH') return json(200, {});
+        if (url.startsWith('/api/products'))
+          return json(200, {
+            items: [
+              { id: 'p9', sku: 'TEA-001', name: 'Green tea' },
+              { id: 'p8', sku: 'TEA-002', name: 'Black tea' },
+            ],
+            total: 2,
+          });
+        if (url.startsWith('/api/categories')) return json(200, []);
         return json(200, list);
       }),
     );
@@ -159,7 +244,11 @@ describe('<Promotions>', () => {
     await userEvent.type(screen.getByLabelText('Name', { exact: true }), 'Tea time');
     await userEvent.type(screen.getByLabelText('Percent', { exact: true }), '15');
     await userEvent.selectOptions(screen.getByLabelText(/^Applies to/), 'skus');
-    await userEvent.type(screen.getByLabelText('SKUs', { exact: true }), 'TEA-001, TEA-002');
+    await userEvent.type(screen.getByLabelText('Search SKUs'), 'tea');
+    await userEvent.click(await screen.findByRole('option', { name: 'TEA-001 · Green tea' }));
+    await userEvent.type(screen.getByLabelText('Search SKUs'), 'tea');
+    await userEvent.click(await screen.findByRole('option', { name: 'TEA-002 · Black tea' }));
+    expect(within(screen.getByLabelText('Chosen SKUs')).getByText('TEA-001')).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText('From'), '2026-11-01');
     await userEvent.type(screen.getByLabelText('To (last day)'), '2026-11-07');
     await userEvent.click(screen.getByRole('button', { name: 'Create promotion' }));
@@ -181,15 +270,39 @@ describe('<RefundItems> refund policy', () => {
     payment: { method: 'cash' },
     refundBy: '2026-11-22T04:00:00Z',
     lines: [
-      { lineNo: 1, name: 'Coffee', qty: 2, unitPriceCents: 413, taxRateBp: 1300, discountCents: 166, lineSubtotalCents: 660, lineTaxCents: 86, refundable: true, refundedQty: 0 },
-      { lineNo: 2, name: 'Sandwich', qty: 1, unitPriceCents: 600, taxRateBp: 1300, lineSubtotalCents: 600, lineTaxCents: 78, refundable: false, refundedQty: 0 },
+      {
+        lineNo: 1,
+        name: 'Coffee',
+        qty: 2,
+        unitPriceCents: 413,
+        taxRateBp: 1300,
+        discountCents: 166,
+        lineSubtotalCents: 660,
+        lineTaxCents: 86,
+        refundable: true,
+        refundedQty: 0,
+      },
+      {
+        lineNo: 2,
+        name: 'Sandwich',
+        qty: 1,
+        unitPriceCents: 600,
+        taxRateBp: 1300,
+        lineSubtotalCents: 600,
+        lineTaxCents: 78,
+        refundable: false,
+        refundedQty: 0,
+      },
     ],
     ...extra,
   });
 
   it('final-sale lines are locked until a manager overrides with a reason', async () => {
     let sent;
-    vi.stubGlobal('fetch', vi.fn(async (url, opts) => ((sent = JSON.parse(opts.body)), json(201, { receipt: {} }))));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, opts) => ((sent = JSON.parse(opts.body)), json(201, { receipt: {} }))),
+    );
     render(<RefundItems receipt={receipt()} token="t" onCancel={vi.fn()} onDone={vi.fn()} now={Date.parse('2026-10-24T00:00:00Z')} />);
     expect(screen.getByLabelText('Refund quantity for Sandwich')).toBeDisabled();
     expect(screen.getByText('$3.30 paid each · sold 2')).toBeInTheDocument(); // the discounted price
@@ -203,7 +316,14 @@ describe('<RefundItems> refund policy', () => {
     expect(submit).toBeDisabled(); // reason required
     await userEvent.type(screen.getByLabelText(/Reason/), 'spoiled');
     await userEvent.click(submit);
-    expect(sent).toEqual({ items: [{ lineNo: 1, qty: 2 }, { lineNo: 2, qty: 1 }], reason: 'spoiled', override: true });
+    expect(sent).toEqual({
+      items: [
+        { lineNo: 1, qty: 2 },
+        { lineNo: 2, qty: 1 },
+      ],
+      reason: 'spoiled',
+      override: true,
+    });
   });
 
   it('after the refund window everything is locked unless overridden', async () => {
@@ -239,7 +359,7 @@ describe('<Products> inline edit and refund flag', () => {
     await userEvent.clear(screen.getByLabelText('Tax % for COF-001'));
     await userEvent.type(screen.getByLabelText('Tax % for COF-001'), '5');
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await vi.waitFor(() => expect(patches[0]).toEqual(['/api/products/p1', { priceCents: 399, taxRateBp: 500 }]));
+    await vi.waitFor(() => expect(patches[0]).toEqual(['/api/products/p1', { priceCents: 399, taxRateBp: 500, barcode: null, expiresOn: null }]));
     expect(screen.getByRole('button', { name: 'Refund policy for SAN-001' })).toHaveTextContent('Final sale');
     await userEvent.click(screen.getByRole('button', { name: 'Refund policy for SAN-001' }));
     await vi.waitFor(() => expect(patches[1]).toEqual(['/api/products/p2', { refundable: true }]));
@@ -261,7 +381,9 @@ describe('<Team> store refund policy', () => {
       vi.fn(async (url, opts = {}) => {
         if (url === '/api/store/settings') {
           const b = JSON.parse(opts.body);
-          return b.refundWindowDays > 365 ? json(400, { error: 'refundWindowDays must be a whole number from 0 to 365' }) : json(200, { refundWindowDays: b.refundWindowDays });
+          return b.refundWindowDays > 365
+            ? json(400, { error: 'refundWindowDays must be a whole number from 0 to 365' })
+            : json(200, { refundWindowDays: b.refundWindowDays });
         }
         return json(200, [{ id: 'u1', name: 'Maya', email: 'm@x.test', role: 'manager', active: true }]);
       }),
