@@ -68,20 +68,8 @@ function normaliseBasket(raw) {
   return [...merged].map(([productId, qty]) => ({ productId, qty }));
 }
 
-/** Validates payment against the total and returns the stored payment fields. */
-function settlePayment(payment, totalCents) {
-  if (!payment || !['cash', 'card'].includes(payment.method)) throw validation("payment.method must be 'cash' or 'card'");
-  if (payment.method === 'cash') {
-    const t = payment.tenderedCents;
-    if (!Number.isInteger(t) || t < totalCents) throw validation('cash tendered must be an integer number of cents >= total');
-    return { method: 'cash', tenderedCents: t, changeCents: t - totalCents, cardReference: null };
-  }
-  // Card is taken on an external terminal; the POS only records its approval
-  // reference. No card number ever reaches eURC (keeps the app out of PCI scope).
-  const ref = String(payment.reference || '').trim();
-  if (!/^[A-Za-z0-9-]{4,40}$/.test(ref)) throw validation('card payments need the terminal approval reference (4-40 letters/digits)');
-  return { method: 'card', tenderedCents: null, changeCents: null, cardReference: ref };
-}
+// Payments moved to ./payments (v2.4: debit, credit, e-Transfer, Stripe).
+const { settlePayment } = require('./payments');
 
 function validation(message) {
   const e = new Error(message);

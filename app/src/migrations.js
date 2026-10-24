@@ -237,6 +237,34 @@ CREATE TABLE dbo.categories (
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ux_categories_store_parent_name')
   CREATE UNIQUE INDEX ux_categories_store_parent_name ON dbo.categories(store_id, parent_id, name);`,
   },
+  {
+    // v2.4 payments and the GST/HST report. Expand only. Older versions only
+    // understand payment_method 'cash' or 'card', so v2.4 keeps writing that
+    // value there (debit, credit, e-Transfer and Stripe as 'card') and the
+    // exact type in the new payment_type column (dual write). Caveat after a
+    // rollback to v2.3: those sales show as "Card" and its refund screen says
+    // "reverse on the card terminal" for e-Transfer and Stripe sales too.
+    // The indexes serve the GST/HST report: refunds by date, and v2.0 whole-sale
+    // refunds (no refund rows) by refund date. The CHECK is added WITH NOCHECK:
+    // every existing row is NULL anyway, and skipping the check avoids a full
+    // scan of dbo.sales while the migration transaction holds its locks.
+    // Index builds stay offline: the migration runs inside a transaction, the
+    // refunds table is small and the second index only holds refunded sales.
+    version: 7,
+    name: 'payment_types_and_tax_report',
+    sql: `
+IF COL_LENGTH(N'dbo.sales', N'payment_type') IS NULL
+  ALTER TABLE dbo.sales ADD payment_type NVARCHAR(10) NULL;
+IF COL_LENGTH(N'dbo.sales', N'payment_brand') IS NULL
+  ALTER TABLE dbo.sales ADD payment_brand NVARCHAR(20) NULL;
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = N'ck_sales_payment_type')
+  EXEC(N'ALTER TABLE dbo.sales WITH NOCHECK ADD CONSTRAINT ck_sales_payment_type
+    CHECK (payment_type IN (N''cash'', N''debit'', N''credit'', N''card'', N''etransfer'', N''stripe''))');
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_refunds_store_created')
+  CREATE INDEX ix_refunds_store_created ON dbo.refunds(store_id, created_at);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'ix_sales_store_refunded')
+  EXEC(N'CREATE INDEX ix_sales_store_refunded ON dbo.sales(store_id, refunded_at) WHERE status = N''refunded''');`,
+  },
 ];
 
 const BOOTSTRAP_SQL = `

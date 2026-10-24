@@ -26,6 +26,7 @@ const PERMISSIONS = {
   'categories.manage': ['admin', 'manager', 'procurement'],
   'promotions.manage': ['admin', 'manager', 'sales'],
   'reports.view': ['admin', 'manager', 'sales'],
+  'reports.tax': ['admin', 'manager'], // GST/HST report (v2.4)
   'staff.manage': ['admin', 'manager'],
   'store.settings': ['admin', 'manager'], // refund window
   'business.profile': ['admin'], // legal name, tax numbers, bank, payment methods
